@@ -1,0 +1,25 @@
+# Counter-UAS / air-to-air tracking profile (e.g. TEKNOFEST "Savasan IHA" style camera lock).
+# Requires weights fine-tuned on an anti-UAV / drone dataset with a 'drone' class
+# (see scripts/train.py). Lock rules mirror the competition-style lock rectangle:
+# target fully inside the central zone, >= 5% of frame, held for 4 s.
+# Output is a camera/gimbal centring error only - operator stays in the loop.
+profile: counter_uas
+detector:
+  kind: yolo
+  model: weights/drone_yolo11n.pt
+  conf: 0.40
+  imgsz: 640
+tracker:
+  iou_threshold: 0.2
+  max_age: 20
+  min_hits: 3
+lock:
+  zone: [0.25, 0.10, 0.75, 0.90]
+  min_size_frac: 0.05
+  acquire_seconds: 4.0
+  lost_grace_seconds: 0.5
+  target_labels: [drone]
+  require_operator_confirm: true
+output:
+  telemetry: runs/counter_uas.jsonl
+  save_video: runs/counter_uas.mp4

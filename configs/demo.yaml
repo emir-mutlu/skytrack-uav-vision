@@ -1,0 +1,11 @@
+# Demo profile: classic shape detector on the synthetic scene, auto lock.
+profile: demo
+detector:
+  kind: classic
+  min_side: 20
+lock:
+  zone: [0.2, 0.1, 0.8, 0.9]
+  acquire_seconds: 1.0
+  require_operator_confirm: false
+output:
+  show: true

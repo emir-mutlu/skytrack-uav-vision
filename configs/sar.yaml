@@ -1,0 +1,15 @@
+# Search & Rescue profile: maximise recall on people, long track memory, no lock gating.
+profile: sar
+detector:
+  kind: yolo
+  model: yolo11s.pt
+  conf: 0.20
+  imgsz: 1280
+  classes: [0]
+tracker:
+  max_age: 60
+  min_hits: 2
+lock:
+  enabled: false
+output:
+  telemetry: runs/sar.jsonl
