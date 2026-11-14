@@ -103,7 +103,8 @@ class Pipeline:
 
                 assert res is not None
                 vis = draw_hud(frame.copy(), res.tracks, res.lock, self.locker, res.fps,
-                               res.latency_ms, self.detector.name, out.draw_trails, paused)
+                               res.latency_ms, self.detector.name, out.draw_trails, paused,
+                               profile=self.cfg.profile, frame_idx=res.index)
 
                 if out.save_video and not paused:
                     if writer is None:

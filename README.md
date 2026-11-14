@@ -4,7 +4,9 @@ Real-time perception pipeline for UAV video: **detect → track → lock**, with
 structured telemetry and a reproducible benchmark. Runs on a laptop CPU, scales to a GPU or an
 edge device (Jetson / ONNX / TensorRT) by swapping the detector.
 
-![HUD](assets/demo.png)
+<p align="center">
+  <img src="assets/demo.webp" alt="SkyTrack demo: search, acquire and lock on a moving target" width="100%">
+</p>
 
 ## Features
 
@@ -18,12 +20,15 @@ edge device (Jetson / ONNX / TensorRT) by swapping the detector.
 - **Human-in-the-loop** — the operator designates a track (click / TAB); by default the system
   only proposes candidates
 - **Centring error output** — normalised target offset for gimbal / camera follow
-- **Operator HUD** — lock zone, boresight, trails, acquisition progress bar, FPS and latency
+- **Operator HUD** — translucent panels with crisp TrueType text, lock-zone brackets, boresight
+  reticle, circular acquisition progress, pulsing lock box, fading trails, motion vectors and a
+  boresight-error indicator; resolution-independent layout from 480p to 4K, ~5–7 ms per 720p frame
+  thanks to cached glyph sprites
 - **JSONL telemetry** — per-frame tracks and lock state, lock events, run summary
 - **Any video source** — files, webcams, **RTSP / UDP streams** (threaded latest-frame grabber,
   no latency build-up)
 - **Reproducible benchmark** — synthetic scene with ground truth (precision / recall / F1 / MOTA /
-  ID switches / latency), **19 pytest tests**, accuracy regression gate in CI
+  ID switches / latency), **28 pytest tests**, accuracy regression gate in CI
 - **Engineering** — installable package, YAML mission profiles, CLI, Docker image, GitHub Actions
   CI, ruff lint
 
@@ -76,6 +81,18 @@ skytrack run -s 0 --detector yolo --model yolo11n.pt   # webcam
 
 **Controls:** left-click a box or `TAB` to designate a target · `R` release · `SPACE` pause · `Q` quit.
 `--auto-lock` lets the system pick the candidate itself (useful for camera-follow tests).
+
+## Operator HUD
+
+![HUD](assets/hud.png)
+
+| Element | Meaning |
+|---|---|
+| Status pill (top left) | Lock state — `SEARCHING` · `ACQUIRING` · `LOCKED` · `LOST` — with target ID and lock time |
+| Telemetry (top right) | Processing FPS, detector latency, active tracks, detector backend |
+| Corner brackets | Tracks: teal = tracked, cyan = lock candidate, amber/red = designated target |
+| Amber ring / red box | Acquisition progress / confirmed lock |
+| Dashed line + error box | Target offset from the boresight, the signal a gimbal controller would centre |
 
 ## Mission profiles (`configs/`)
 
@@ -131,8 +148,9 @@ applicable law, airspace rules and rules of engagement.
 ## Development
 
 ```bash
-pytest -q          # 19 tests incl. end-to-end pipeline and accuracy regression gate
+pytest -q          # 28 tests incl. HUD rendering, end-to-end pipeline and accuracy regression gate
 ruff check src tests scripts
+python scripts/render_media.py   # regenerate README media (assets/hud.png, assets/demo.webp)
 docker build -t skytrack . && docker run --rm -v %cd%/runs:/app/runs skytrack
 ```
 

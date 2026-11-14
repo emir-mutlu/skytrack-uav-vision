@@ -172,3 +172,35 @@ def test_benchmark_regression_gate():
 
 def test_default_config_roundtrip():
     assert Config().to_dict()["detector"]["kind"] == "classic"
+
+
+# ---------------------------------------------------------------- HUD
+@pytest.mark.parametrize("state", list(LockState))
+@pytest.mark.parametrize("shape", [(480, 640, 3), (1080, 1920, 3)])
+def test_hud_renders_every_state_at_any_resolution(state, shape):
+    from skytrack.hud import draw_hud
+    from skytrack.lock import LockStatus
+
+    h, w = shape[:2]
+    frame = np.full(shape, 90, np.uint8)
+    tr = _track(cx=w // 2 + 40, cy=h // 2, s=h // 10)
+    tr.history = [(w // 2, h // 2 + i) for i in range(10)]
+    status = LockStatus(state=state, track_id=1, bbox=tr.bbox, progress=0.4, error=(0.1, -0.2),
+                        lock_duration=1.5)
+    out = draw_hud(frame.copy(), [tr], status, TargetLock(), 30.0, 5.0, "classic",
+                   paused=True, profile="demo", frame_idx=12)
+    assert out.shape == shape and out.dtype == np.uint8
+    assert (out != frame).any()
+
+
+def test_hud_track_only_mode_and_fonts():
+    from skytrack.hud import _sprite, draw_hud, get_font
+    from skytrack.lock import LockStatus
+
+    for kind in ("sans", "bold", "mono"):
+        assert get_font(kind, 14) is not None
+    fill, _, width = _sprite("12.3 ms", "mono", 14, 0)
+    assert width > 0 and fill.max() > 0.5
+    frame = np.zeros((540, 960, 3), np.uint8)
+    out = draw_hud(frame, [], LockStatus(), TargetLock(LockConfig(enabled=False)), 0.0, 0.0, "yolo")
+    assert out.shape == (540, 960, 3)
