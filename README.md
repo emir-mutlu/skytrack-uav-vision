@@ -4,28 +4,28 @@ Real-time perception pipeline for UAV video: **detect → track → lock**, with
 structured telemetry and a reproducible benchmark. Runs on a laptop CPU, scales to a GPU or an
 edge device (Jetson / ONNX / TensorRT) by swapping the detector.
 
-> Inspired by PyImageSearch's 2015 post *"Target acquired: Finding targets in drone and quadcopter
-> video streams using Python and OpenCV"*. That project was a single script that found square
-> markers frame by frame. SkyTrack rebuilds the idea as a modular, tested system with deep-learning
-> detection, multi-object tracking and a target-lock state machine.
-
 ![HUD](assets/demo.png)
 
-## What changed since the 2015 version
+## Features
 
-| 2015 original | SkyTrack (2026) |
-|---|---|
-| Single script, hard-coded thresholds | Installable package, YAML mission profiles, CLI |
-| Contour + `approxPolyDP` only | **Pluggable detectors**: classic shape detector (modernised: CLAHE, auto-Canny, NMS, confidence score) **or** Ultralytics **YOLO11** (COCO / VisDrone / custom drone weights, ONNX/TensorRT export) |
-| No memory between frames | **Kalman-filter multi-object tracker** (SORT family, Hungarian/greedy IoU association, persistent IDs, velocity estimates, dropout coasting) |
-| "Target found" text | **Target-lock state machine** (`SEARCHING → ACQUIRING → LOCKED → LOST`) with lock zone, minimum size, hold time and grace period |
-| — | **Human-in-the-loop**: operator designates a track (click / TAB); system only proposes candidates by default |
-| — | Normalised **centring error** output for gimbal/camera follow |
-| — | **Operator HUD**: lock zone, boresight, trails, acquisition progress bar, FPS & latency |
-| — | **JSONL telemetry** + lock events + run summary |
-| File input only | Files, webcams, **RTSP/UDP streams** (threaded, latest-frame grabber → no latency build-up) |
-| Eyeball testing | **Synthetic benchmark with ground truth** (precision / recall / F1 / MOTA / ID-switches / latency), **19 pytest tests**, accuracy regression gate in CI |
-| — | Docker image, GitHub Actions CI, ruff lint |
+- **Pluggable detectors** — a lightweight OpenCV shape detector (CLAHE, auto-Canny, containment
+  NMS, confidence score; no GPU or training data needed) **or** Ultralytics **YOLO11**
+  (COCO / VisDrone / custom drone weights, ONNX / TensorRT export)
+- **Kalman-filter multi-object tracker** — SORT family, Hungarian / greedy IoU association,
+  persistent IDs, velocity estimates, coasting through short dropouts
+- **Target-lock state machine** — `SEARCHING → ACQUIRING → LOCKED → LOST` with lock zone,
+  minimum target size, hold time and grace period
+- **Human-in-the-loop** — the operator designates a track (click / TAB); by default the system
+  only proposes candidates
+- **Centring error output** — normalised target offset for gimbal / camera follow
+- **Operator HUD** — lock zone, boresight, trails, acquisition progress bar, FPS and latency
+- **JSONL telemetry** — per-frame tracks and lock state, lock events, run summary
+- **Any video source** — files, webcams, **RTSP / UDP streams** (threaded latest-frame grabber,
+  no latency build-up)
+- **Reproducible benchmark** — synthetic scene with ground truth (precision / recall / F1 / MOTA /
+  ID switches / latency), **19 pytest tests**, accuracy regression gate in CI
+- **Engineering** — installable package, YAML mission profiles, CLI, Docker image, GitHub Actions
+  CI, ruff lint
 
 ## Architecture
 
