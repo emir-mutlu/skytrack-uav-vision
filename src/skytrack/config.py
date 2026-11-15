@@ -67,7 +67,7 @@ class TerrainConfig:
 class GimbalConfig:
     follow: bool = False  # keep the designated target centred by commanding gimbal rates
     kp: float = 2.0  # (deg/s) per degree of angular error
-    ki: float = 0.0
+    ki: float = 1.0  # removes the steady lag when following a moving target
     kd: float = 0.05
     max_rate_dps: float = 60.0
     deadband: float = 0.02  # normalised image error ignored around the centre

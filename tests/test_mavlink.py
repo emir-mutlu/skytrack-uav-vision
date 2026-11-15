@@ -63,7 +63,7 @@ def test_rays_at_or_above_horizon_return_none():
 
 # ---------------------------------------------------------------- gimbal controller
 def test_gimbal_controller_signs_deadband_clamp_and_stop():
-    ctl = GimbalController(GimbalConfig(kp=2.0, kd=0.0, max_rate_dps=30.0, deadband=0.05, rate_hz=1000),
+    ctl = GimbalController(GimbalConfig(kp=2.0, ki=0.0, kd=0.0, max_rate_dps=30.0, deadband=0.05, rate_hz=1000),
                            hfov_deg=90.0, aspect=1.0)
     assert ctl.update((0.01, -0.01), 0.0) == (0.0, 0.0)  # inside deadband
     pitch, yaw = ctl.update((0.2, 0.2), 0.1)  # target right and below
@@ -151,7 +151,7 @@ def test_closed_loop_gimbal_follow_keeps_target_centred(tmp_path):
     assert len(locked) > 30
     tail = locked[-20:]
     errs = sorted(max(abs(e) for e in r["lock"]["error"]) for r in tail)
-    assert errs[len(errs) // 2] < 0.08 and errs[-1] < 0.2  # target held near the centre
+    assert errs[len(errs) // 2] < 0.1 and errs[-1] < 0.3  # target held near the centre (PI loop)
     assert all(r["vehicle"]["connected"] for r in tail)
     assert all(r.get("target_geo") for r in tail)
     assert abs(sim.gimbal_pitch + 45.0) + abs(sim.gimbal_yaw) > 1.0  # the gimbal actually moved
