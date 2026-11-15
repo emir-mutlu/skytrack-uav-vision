@@ -12,6 +12,8 @@ import numpy as np
 
 from .config import Config
 from .detectors import Detector, build_detector
+from .geo import GeoPoint, geolocate
+from .gimbal import GimbalController
 from .hud import draw_hud
 from .lock import LockStatus, TargetLock
 from .sources import FpsMeter
@@ -42,6 +44,12 @@ class Pipeline:
         self.locker = TargetLock(cfg.lock)
         self.fps_meter = FpsMeter()
         self._last_tracks: list[Track] = []
+        self.link = None
+        self.gimbal_ctl: GimbalController | None = None
+        if cfg.mavlink.enabled:
+            from .vehicle import MavlinkLink  # optional dependency (pymavlink)
+
+            self.link = MavlinkLink(cfg.mavlink)
 
     # ------------------------------------------------------------------ core
     def process(self, frame: np.ndarray, index: int, t: float) -> FrameResult:
@@ -51,7 +59,42 @@ class Pipeline:
         lock = self.locker.update(tracks, frame.shape, t)
         latency = (time.perf_counter() - t0) * 1000.0
         self._last_tracks = tracks
-        return FrameResult(index, t, dets, tracks, lock, latency, self.fps_meter.tick())
+        res = FrameResult(index, t, dets, tracks, lock, latency, self.fps_meter.tick())
+        if self.link is not None:
+            self._vehicle_step(frame.shape, res)
+        return res
+
+    # ------------------------------------------------------------------ vehicle integration
+    def _vehicle_step(self, shape: tuple[int, ...], res: FrameResult) -> None:
+        """Geolocate tracks with the live vehicle state and drive the gimbal follow loop."""
+        cfg, cam = self.cfg, self.cfg.camera
+        vs = self.link.state
+        connected = vs.connected(cfg.mavlink.heartbeat_timeout)
+        res.extras["vehicle"] = vs
+        h, w = shape[:2]
+        aspect = h / w
+
+        if cfg.mavlink.geolocate and connected and vs.has_position:
+            gp = vs.gimbal_pitch_deg if vs.gimbal_pitch_deg is not None else cam.default_pitch_deg
+            gy = vs.gimbal_yaw_deg if vs.gimbal_yaw_deg is not None else cam.default_yaw_deg
+            geo: dict[int, GeoPoint] = {}
+            for tr in res.tracks:
+                pt = geolocate(TargetLock.centre_error(tr, shape), vs.lat, vs.lon, vs.alt_rel,
+                               (vs.roll, vs.pitch, vs.yaw), gp, gy, cam.hfov_deg, aspect, cam.stabilized)
+                if pt is not None:
+                    geo[tr.track_id] = pt
+            res.extras["track_geo"] = geo
+            if res.lock.track_id in geo:
+                res.extras["target_geo"] = geo[res.lock.track_id]
+
+        if cfg.mavlink.gimbal.follow:
+            if self.gimbal_ctl is None:
+                self.gimbal_ctl = GimbalController(cfg.mavlink.gimbal, cam.hfov_deg, aspect)
+            cmd = self.gimbal_ctl.update(res.lock.error if connected else None, res.t)
+            if cmd is not None:
+                self.link.send_gimbal_rates(*cmd)
+                res.extras["gimbal_cmd"] = cmd
+            res.extras["gimbal_follow"] = self.gimbal_ctl.active
 
     # ------------------------------------------------------------------ operator input
     def designate_at(self, x: int, y: int, t: float) -> None:
@@ -78,6 +121,8 @@ class Pipeline:
         state = {"t": 0.0, "click": None}
         start = time.perf_counter()
         paused = False
+        if self.link is not None:
+            self.link.start()
 
         if show:
             cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
@@ -98,13 +143,16 @@ class Pipeline:
                     t = (time.perf_counter() - start) if live else idx / src_fps
                     state["t"] = t
                     res = self.process(frame, idx, t)
-                    telemetry.write(idx, t, res.fps, res.tracks, res.lock, res.latency_ms)
+                    telemetry.write(idx, t, res.fps, res.tracks, res.lock, res.latency_ms, res.extras)
                     idx += 1
 
                 assert res is not None
                 vis = draw_hud(frame.copy(), res.tracks, res.lock, self.locker, res.fps,
                                res.latency_ms, self.detector.name, out.draw_trails, paused,
-                               profile=self.cfg.profile, frame_idx=res.index)
+                               profile=self.cfg.profile, frame_idx=res.index,
+                               vehicle=res.extras.get("vehicle"), target_geo=res.extras.get("target_geo"),
+                               gimbal_follow=bool(res.extras.get("gimbal_follow")),
+                               link_timeout=self.cfg.mavlink.heartbeat_timeout)
 
                 if out.save_video and not paused:
                     if writer is None:
@@ -128,6 +176,10 @@ class Pipeline:
                         self.designate_at(*state["click"], state["t"])
                         state["click"] = None
         finally:
+            if self.link is not None:
+                if self.gimbal_ctl is not None and self.gimbal_ctl.active:
+                    self.link.send_gimbal_rates(0.0, 0.0)  # leave the gimbal still
+                self.link.stop()
             telemetry.close()
             if writer is not None:
                 writer.release()

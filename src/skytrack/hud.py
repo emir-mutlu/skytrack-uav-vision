@@ -17,6 +17,7 @@ import os
 import time
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
@@ -24,6 +25,10 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .lock import LockState, LockStatus, TargetLock
 from .types import BBox, Track
+
+if TYPE_CHECKING:
+    from .geo import GeoPoint
+    from .vehicle import VehicleState
 
 # Palette (BGR - text is drawn straight onto the BGR buffer, so Pillow gets BGR too)
 WHITE = (242, 242, 242)
@@ -258,6 +263,28 @@ def _track_color(t: Track, lock: LockStatus, state_col) -> tuple[int, int, int]:
     return CYAN if t.track_id == lock.candidate_id else TEAL
 
 
+def _vehicle_rows(vs: VehicleState, geo: GeoPoint | None, follow: bool,
+                  timeout: float) -> list[tuple[str, str, tuple[int, int, int]]]:
+    if not vs.connected(timeout):
+        return [("LINK", "NO HEARTBEAT", AMBER)]
+    rows = [("LINK", f"{vs.mode or '?'} · {'ARMED' if vs.armed else 'DISARMED'}",
+             TEAL if vs.armed else GREY)]
+    if vs.has_position:
+        rows.append(("POS", f"{vs.lat:.6f} {vs.lon:.6f}", WHITE))
+        hdg = f"{vs.heading_deg:03.0f}°" if vs.heading_deg is not None else "---"
+        rows.append(("ALT", f"{vs.alt_rel:5.1f} m   HDG {hdg}", WHITE))
+        if vs.groundspeed is not None:
+            rows.append(("GS", f"{vs.groundspeed:4.1f} m/s", WHITE))
+    if vs.gimbal_pitch_deg is not None:
+        rows.append(("GMB", f"P{vs.gimbal_pitch_deg:+.1f}°  Y{vs.gimbal_yaw_deg or 0.0:+.1f}°", WHITE))
+    if follow:
+        rows.append(("CAM", "FOLLOWING TARGET", CYAN))
+    if geo is not None:
+        rows.append(("TGT", f"{geo.lat:.6f} {geo.lon:.6f}", RED))
+        rows.append(("RNG", f"{geo.ground_range_m:.0f} m ground", RED))
+    return rows
+
+
 # ----------------------------------------------------------------------------- HUD
 def draw_hud(
     frame: np.ndarray,
@@ -271,6 +298,10 @@ def draw_hud(
     paused: bool = False,
     profile: str = "",
     frame_idx: int | None = None,
+    vehicle: VehicleState | None = None,
+    target_geo: GeoPoint | None = None,
+    gimbal_follow: bool = False,
+    link_timeout: float = 3.0,
 ) -> np.ndarray:
     cv = _Canvas(frame)
     img, h, w, px = frame, cv.h, cv.w, cv.px
@@ -291,6 +322,12 @@ def draw_hud(
     hb = (cx - hw // 2, h - pad - px(26), cx + hw // 2, h - pad)
     for rect in (tl, tr, er, bl, hb):
         cv.panel(rect)
+    vrows: list[tuple[str, str, tuple[int, int, int]]] = []
+    if vehicle is not None:
+        vrows = _vehicle_rows(vehicle, target_geo, gimbal_follow, link_timeout)
+        row_h = px(19)
+        vp = (pad, tl[3] + px(8), pad + px(232), tl[3] + px(8) + px(12) + row_h * len(vrows))
+        cv.panel(vp)
     if lock_on:
         zx1, zy1, zx2, zy2 = map(int, locker.zone_px(frame.shape))
         zl_w = cv.text_width("LOCK ZONE", 10) + px(14)
@@ -423,6 +460,12 @@ def draw_hud(
         if i:
             xx = int(tr[0] + cw * i)
             cv2.line(img, (xx, tr[1] + px(12)), (xx, tr[3] - px(12)), (70, 70, 70), 1, AA)
+
+    # vehicle panel (left, under the status panel)
+    for i, (k, v, col) in enumerate(vrows):
+        y = vp[1] + px(6) + row_h * i + row_h / 2
+        cv.text((vp[0] + px(10), y), k, GREY, 10, "sans", "lm")
+        cv.text((vp[0] + px(46), y), v, col, 12, "mono", "lm")
 
     # footer (bottom left): UTC clock + frame counter
     stamp = time.strftime("%Y-%m-%d  %H:%M:%S", time.gmtime())

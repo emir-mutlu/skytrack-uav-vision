@@ -49,6 +49,43 @@ class LockConfig:
 
 
 @dataclass
+class CameraConfig:
+    hfov_deg: float = 80.0  # horizontal field of view of the lens
+    stabilized: bool = True  # 3-axis gimbal holds roll/pitch level (ignore vehicle roll/pitch)
+    # Used when no gimbal attitude is reported (fixed mount, or before the first report):
+    default_pitch_deg: float = -90.0  # -90 = nadir, 0 = horizon
+    default_yaw_deg: float = 0.0  # relative to the vehicle nose
+
+
+@dataclass
+class GimbalConfig:
+    follow: bool = False  # keep the designated target centred by commanding gimbal rates
+    kp: float = 2.0  # (deg/s) per degree of angular error
+    ki: float = 0.0
+    kd: float = 0.05
+    max_rate_dps: float = 60.0
+    deadband: float = 0.02  # normalised image error ignored around the centre
+    rate_hz: float = 20.0  # max command rate sent to the autopilot
+
+
+@dataclass
+class MavlinkConfig:
+    enabled: bool = False
+    # pymavlink connection string: udpin:0.0.0.0:14550 (SITL / telemetry radio via MAVProxy),
+    # tcp:127.0.0.1:5760, COM5 / /dev/ttyACM0 (USB), /dev/ttyTHS1 (Jetson UART) ...
+    connection: str = "udpin:0.0.0.0:14550"
+    baud: int = 57600
+    source_system: int = 1
+    source_component: int = 191  # MAV_COMP_ID_ONBOARD_COMPUTER
+    target_system: int = 1
+    target_component: int = 1  # autopilot (acts as gimbal manager)
+    stream_hz: float = 10.0  # requested rate for position / attitude / gimbal messages
+    heartbeat_timeout: float = 3.0
+    geolocate: bool = True
+    gimbal: GimbalConfig = field(default_factory=GimbalConfig)
+
+
+@dataclass
 class OutputConfig:
     show: bool = True
     save_video: str | None = None
@@ -62,6 +99,8 @@ class Config:
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     tracker: TrackerConfig = field(default_factory=TrackerConfig)
     lock: LockConfig = field(default_factory=LockConfig)
+    camera: CameraConfig = field(default_factory=CameraConfig)
+    mavlink: MavlinkConfig = field(default_factory=MavlinkConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
 
     def to_dict(self) -> dict[str, Any]:

@@ -1,0 +1,103 @@
+"""Pixel -> ground geolocation for a gimballed (or fixed) UAV camera.
+
+A pixel is turned into a viewing ray with a pinhole model derived from the lens HFOV,
+rotated into the local North-East-Down frame using the gimbal and vehicle attitude,
+and intersected with a flat ground plane `alt_agl` metres below the camera.
+
+Conventions (aerospace, right-handed, FRD / NED):
+    camera frame  x = optical axis, y = image right, z = image down
+    pitch         positive = up, -90 deg = nadir
+    yaw           positive = clockwise seen from above (towards east from north)
+
+Flat-earth assumption: accurate to a few metres for ranges below ~2 km over level
+terrain; a DEM lookup would be the next refinement for hilly areas.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+
+import numpy as np
+
+EARTH_RADIUS_M = 6_378_137.0
+
+
+@dataclass(frozen=True)
+class GeoPoint:
+    lat: float
+    lon: float
+    north_m: float  # offset from the vehicle
+    east_m: float
+    ground_range_m: float
+    slant_range_m: float
+
+
+def _rx(a: float) -> np.ndarray:
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+
+
+def _ry(a: float) -> np.ndarray:
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+
+
+def _rz(a: float) -> np.ndarray:
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+
+
+def camera_ray(err: tuple[float, float], hfov_deg: float, aspect: float) -> np.ndarray:
+    """Unit ray in the camera frame for a normalised image offset `err` in [-1, 1]
+    (as produced by TargetLock.centre_error). `aspect` = height / width."""
+    tan_h = math.tan(math.radians(hfov_deg) / 2.0)
+    ray = np.array([1.0, err[0] * tan_h, err[1] * tan_h * aspect])
+    return ray / np.linalg.norm(ray)
+
+
+def camera_to_ned(
+    vehicle_rpy: tuple[float, float, float],
+    gimbal_pitch_deg: float,
+    gimbal_yaw_deg: float,
+    stabilized: bool = True,
+) -> np.ndarray:
+    """Rotation matrix camera -> NED. `vehicle_rpy` in radians, gimbal angles in degrees
+    (yaw relative to the vehicle nose)."""
+    roll, pitch, yaw = vehicle_rpy
+    gp, gy = math.radians(gimbal_pitch_deg), math.radians(gimbal_yaw_deg)
+    if stabilized:  # gimbal cancels vehicle roll/pitch, yaw follows the airframe
+        return _rz(yaw + gy) @ _ry(gp)
+    return _rz(yaw) @ _ry(pitch) @ _rx(roll) @ _rz(gy) @ _ry(gp)
+
+
+def geolocate(
+    err: tuple[float, float],
+    lat: float,
+    lon: float,
+    alt_agl: float,
+    vehicle_rpy: tuple[float, float, float],
+    gimbal_pitch_deg: float,
+    gimbal_yaw_deg: float,
+    hfov_deg: float,
+    aspect: float,
+    stabilized: bool = True,
+    max_range_m: float = 5000.0,
+) -> GeoPoint | None:
+    """Ground position of the pixel at normalised offset `err`, or None if the ray does
+    not hit the ground within `max_range_m` (at/above the horizon or too shallow)."""
+    if alt_agl <= 0.5:
+        return None
+    ray = camera_to_ned(vehicle_rpy, gimbal_pitch_deg, gimbal_yaw_deg, stabilized) @ camera_ray(
+        err, hfov_deg, aspect
+    )
+    if ray[2] <= 1e-6:
+        return None
+    scale = alt_agl / ray[2]
+    north, east = float(ray[0] * scale), float(ray[1] * scale)
+    ground = math.hypot(north, east)
+    if ground > max_range_m:
+        return None
+    dlat = math.degrees(north / EARTH_RADIUS_M)
+    dlon = math.degrees(east / (EARTH_RADIUS_M * math.cos(math.radians(lat))))
+    return GeoPoint(lat + dlat, lon + dlon, north, east, ground, float(scale))

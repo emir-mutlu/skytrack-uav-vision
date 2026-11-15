@@ -13,3 +13,11 @@ lock:
   enabled: false
 output:
   telemetry: runs/sar.jsonl
+camera:
+  hfov_deg: 82
+mavlink:
+  enabled: false              # enable with: --mavlink <connection>
+  connection: udpin:0.0.0.0:14550
+  geolocate: true
+  gimbal:
+    follow: false

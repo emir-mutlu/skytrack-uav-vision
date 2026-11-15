@@ -23,3 +23,11 @@ lock:
 output:
   telemetry: runs/counter_uas.jsonl
   save_video: runs/counter_uas.mp4
+camera:
+  hfov_deg: 62
+mavlink:
+  enabled: false              # enable with: --mavlink <connection>
+  connection: udpin:0.0.0.0:14550
+  geolocate: true
+  gimbal:
+    follow: true

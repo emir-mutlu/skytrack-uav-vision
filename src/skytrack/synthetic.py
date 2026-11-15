@@ -117,3 +117,44 @@ class SyntheticScene:
     def frames(self, n: int) -> Iterator[tuple[np.ndarray, list[BBox]]]:
         for _ in range(n):
             yield self.step()
+
+
+class PanningScene:
+    """The synthetic world seen through a pan/tilt camera.
+
+    The view is a window into a larger world whose position follows the gimbal angles
+    (pixels per degree from the lens HFOV). Feeding it the simulated gimbal attitude
+    closes the loop - detector -> tracker -> lock -> gimbal command -> camera motion -
+    which is how gimbal-follow is demoed and regression-tested without hardware.
+    """
+
+    def __init__(self, width: int = 960, height: int = 540, hfov_deg: float = 80.0,
+                 margin: float = 0.35, seed: int = 7, noise: float = 4.0, **kwargs):
+        self.w, self.h = width, height
+        self.mw, self.mh = int(width * margin), int(height * margin)
+        # noise is added to the visible window only - the world can be several megapixels
+        self.world = SyntheticScene(width=width + 2 * self.mw, height=height + 2 * self.mh, seed=seed,
+                                    n_targets=2, n_distractors=4, noise=0.0, **kwargs)
+        self.noise = noise
+        self.rng = np.random.default_rng(seed + 1)
+        self.ppd = width / hfov_deg
+        self._ref: tuple[float, float] | None = None
+        for m in self.world.movers:  # start every target inside the initial field of view
+            if m.kind == "target":
+                m.x = float(self.rng.uniform(self.mw + 0.2 * width, self.mw + 0.8 * width - m.size))
+                m.y = float(self.rng.uniform(self.mh + 0.2 * height, self.mh + 0.8 * height - m.size))
+
+    def step(self, gimbal_pitch_deg: float, gimbal_yaw_deg: float) -> tuple[np.ndarray, list[BBox]]:
+        frame, gt = self.world.step()
+        if self._ref is None:
+            self._ref = (gimbal_pitch_deg, gimbal_yaw_deg)
+        dx = float(np.clip((gimbal_yaw_deg - self._ref[1]) * self.ppd, -self.mw, self.mw))
+        dy = float(np.clip(-(gimbal_pitch_deg - self._ref[0]) * self.ppd, -self.mh, self.mh))
+        x0, y0 = int(self.mw + dx), int(self.mh + dy)
+        view = frame[y0:y0 + self.h, x0:x0 + self.w]
+        if self.noise > 0:
+            n = self.rng.normal(0, self.noise, view.shape).astype(np.int16)
+            view = np.clip(view.astype(np.int16) + n, 0, 255).astype(np.uint8)
+        boxes = [(x1 - x0, y1 - y0, x2 - x0, y2 - y0) for x1, y1, x2, y2 in gt
+                 if x2 > x0 and x1 < x0 + self.w and y2 > y0 and y1 < y0 + self.h]
+        return np.ascontiguousarray(view), boxes

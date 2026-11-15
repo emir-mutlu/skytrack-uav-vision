@@ -5,6 +5,8 @@
     skytrack demo  --save runs/demo.mp4
     skytrack eval  --frames 600
     skytrack synth --out data/synthetic.mp4
+    skytrack sim-vehicle                                   # MAVLink test vehicle on tcp:5760
+    skytrack demo --mavlink tcp:127.0.0.1:5760 --gimbal-follow
 """
 
 from __future__ import annotations
@@ -37,6 +39,12 @@ def _overrides(args: argparse.Namespace) -> dict:
         o["output"]["show"] = False
     if getattr(args, "auto_lock", False):
         o["lock"]["require_operator_confirm"] = False
+    if getattr(args, "mavlink", None):
+        o["mavlink"] = {"enabled": True, "connection": args.mavlink}
+    if getattr(args, "gimbal_follow", False):
+        o.setdefault("mavlink", {})["gimbal"] = {"follow": True}
+    if getattr(args, "hfov", None):
+        o["camera"] = {"hfov_deg": args.hfov}
     return {k: v for k, v in o.items() if v}
 
 
@@ -52,6 +60,11 @@ def _common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--auto-lock", action="store_true",
                    help="auto-select the lock candidate instead of waiting for operator designation")
     p.add_argument("--max-frames", type=int)
+    p.add_argument("--mavlink", metavar="CONN",
+                   help="connect to the flight controller: tcp:127.0.0.1:5760 (SITL), udpin:0.0.0.0:14550, COM5")
+    p.add_argument("--gimbal-follow", action="store_true",
+                   help="command gimbal rates to keep the designated target centred")
+    p.add_argument("--hfov", type=float, help="camera horizontal field of view in degrees")
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -66,6 +79,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_demo(args: argparse.Namespace) -> int:
+    if args.closed_loop:
+        return _closed_loop_demo(args)
     args.source = f"synthetic:{args.seed}"
     if not args.config:
         args.config = str(Path(__file__).resolve().parents[2] / "configs" / "demo.yaml")
@@ -74,6 +89,33 @@ def cmd_demo(args: argparse.Namespace) -> int:
     if args.max_frames is None:
         args.max_frames = 600
     return cmd_run(args)
+
+
+def _closed_loop_demo(args: argparse.Namespace) -> int:
+    """Synthetic camera on a simulated MAVLink gimbal: the full detect -> lock -> gimbal
+    command -> camera motion loop, talking real MAVLink over TCP."""
+    from .pipeline import Pipeline
+    from .simvehicle import SimVehicle
+    from .synthetic import PanningScene
+
+    port = args.sim_port
+    sim = SimVehicle(connection=f"tcpin:127.0.0.1:{port}").start()
+    args.mavlink = f"tcp:127.0.0.1:{port}"
+    args.gimbal_follow = True
+    if not args.config:
+        cfg_path = Path(__file__).resolve().parents[2] / "configs" / "demo.yaml"
+        args.config = str(cfg_path) if cfg_path.exists() else None
+    cfg = load_config(args.config, _overrides(args))
+    scene = PanningScene(width=1280, height=720, hfov_deg=cfg.camera.hfov_deg, seed=args.seed)
+    n = args.max_frames or 900
+    frames = (scene.step(sim.gimbal_pitch, sim.gimbal_yaw)[0] for _ in range(n))
+    try:
+        summary = Pipeline(cfg).run(frames, 30.0, live=True)
+    finally:
+        sim.stop()
+    summary["gimbal_commands"] = sim.gimbal_commands
+    print(json.dumps({k: v for k, v in summary.items() if k != "events"}, indent=2))
+    return 0
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
@@ -98,6 +140,27 @@ def cmd_synth(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sim_vehicle(args: argparse.Namespace) -> int:
+    import time
+
+    from .simvehicle import SimVehicle
+
+    sim = SimVehicle(connection=args.connection, altitude=args.altitude, radius=args.radius,
+                     speed=args.speed).start()
+    print(f"simulated vehicle serving MAVLink on {args.connection}  (Ctrl+C to stop)")
+    t_end = time.monotonic() + args.duration if args.duration else None
+    try:
+        while t_end is None or time.monotonic() < t_end:
+            time.sleep(2.0)
+            print(f"gimbal pitch {sim.gimbal_pitch:+6.1f}  yaw {sim.gimbal_yaw:+6.1f}  "
+                  f"rate cmds {sim.gimbal_commands}")
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sim.stop()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="skytrack", description="UAV target detection, tracking & lock")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -109,6 +172,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("demo", help="run on the built-in synthetic scene")
     p.add_argument("--seed", type=int, default=7)
+    p.add_argument("--closed-loop", action="store_true",
+                   help="camera on a simulated MAVLink gimbal that follows the locked target")
+    p.add_argument("--sim-port", type=int, default=5770, help="TCP port for the simulated vehicle")
     _common(p)
     p.set_defaults(func=cmd_demo)
 
@@ -117,6 +183,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=7)
     _common(p)
     p.set_defaults(func=cmd_eval)
+
+    p = sub.add_parser("sim-vehicle", help="run a minimal MAVLink vehicle (telemetry + gimbal) for testing")
+    p.add_argument("--connection", default="tcpin:127.0.0.1:5760")
+    p.add_argument("--altitude", type=float, default=100.0)
+    p.add_argument("--radius", type=float, default=150.0)
+    p.add_argument("--speed", type=float, default=10.0)
+    p.add_argument("--duration", type=float, help="stop after N seconds (default: run until Ctrl+C)")
+    p.set_defaults(func=cmd_sim_vehicle)
 
     p = sub.add_parser("synth", help="export the synthetic scene as a video file")
     p.add_argument("--out", default="data/synthetic.mp4")

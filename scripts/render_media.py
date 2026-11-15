@@ -9,6 +9,7 @@ HUD or pipeline change and always matches the code in the repository.
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 
 import cv2
@@ -30,6 +31,34 @@ def render(width: int, height: int, frames: int, seed: int, noise: float):
         res = pipe.process(frame, i, i / 30.0)
         yield i, res, draw_hud(frame.copy(), res.tracks, res.lock, pipe.locker, 30.0, res.latency_ms,
                                pipe.detector.name, profile=cfg.profile, frame_idx=i)
+
+
+def render_closed_loop(path: Path, seed: int, frames: int = 150, port: int = 5771) -> None:
+    """Screenshot of the MAVLink closed loop: simulated vehicle + gimbal following the lock."""
+    from skytrack.simvehicle import SimVehicle
+    from skytrack.synthetic import PanningScene
+
+    sim = SimVehicle(connection=f"tcpin:127.0.0.1:{port}").start()
+    cfg = load_config(ROOT / "configs" / "demo.yaml", {
+        "output": {"show": False},
+        "mavlink": {"enabled": True, "connection": f"tcp:127.0.0.1:{port}", "gimbal": {"follow": True}}})
+    pipe = Pipeline(cfg)
+    pipe.link.start()
+    try:
+        pipe.link.wait_connected(10)
+        scene = PanningScene(width=1280, height=720, hfov_deg=cfg.camera.hfov_deg, seed=seed, noise=2.0)
+        t0 = time.perf_counter()
+        for i in range(frames):
+            frame, _ = scene.step(sim.gimbal_pitch, sim.gimbal_yaw)
+            res = pipe.process(frame, i, time.perf_counter() - t0)
+        img = draw_hud(frame.copy(), res.tracks, res.lock, pipe.locker, res.fps, res.latency_ms,
+                       pipe.detector.name, profile=cfg.profile, frame_idx=i,
+                       vehicle=res.extras.get("vehicle"), target_geo=res.extras.get("target_geo"),
+                       gimbal_follow=bool(res.extras.get("gimbal_follow")))
+        cv2.imwrite(str(path), img, [cv2.IMWRITE_PNG_COMPRESSION, 9])
+    finally:
+        pipe.link.stop()
+        sim.stop()
 
 
 def main() -> None:
@@ -62,8 +91,10 @@ def main() -> None:
     frames = [Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
               for i, _, img in render(w, h, int(args.seconds * 30), args.seed, noise=0.0) if i % step == 0]
     frames[0].save(out / "demo.webp", save_all=True, append_images=frames[1:], duration=int(1000 * step / 30),
-                   loop=0, quality=args.quality, method=6)
-    for f in ("hud.png", "demo.webp"):
+                   loop=0, quality=args.quality, method=4)
+    # 3) MAVLink closed loop (simulated vehicle + gimbal follow)
+    render_closed_loop(out / "mavlink.png", args.seed)
+    for f in ("hud.png", "demo.webp", "mavlink.png"):
         print(f"{out / f}  {(out / f).stat().st_size / 1e6:.2f} MB")
 
 

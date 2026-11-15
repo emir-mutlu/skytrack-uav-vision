@@ -29,7 +29,7 @@ class TelemetryWriter:
         self.fps_sum = 0.0
 
     def write(self, idx: int, t: float, fps: float, tracks: list[Track], lock: LockStatus,
-              latency_ms: float) -> None:
+              latency_ms: float, extras: dict[str, Any] | None = None) -> None:
         self.frames += 1
         self.fps_sum += fps
         self.max_tracks = max(self.max_tracks, len(tracks))
@@ -39,6 +39,8 @@ class TelemetryWriter:
             self.events.append(asdict(ev))
         if not self._fh:
             return
+        extras = extras or {}
+        track_geo = extras.get("track_geo", {})
         rec = {
             "frame": idx,
             "t": round(t, 4),
@@ -51,6 +53,8 @@ class TelemetryWriter:
                     "score": round(tr.score, 3),
                     "bbox": [round(v, 1) for v in tr.bbox],
                     "vel": [round(v, 2) for v in tr.velocity],
+                    **({"geo": [round(track_geo[tr.track_id].lat, 7), round(track_geo[tr.track_id].lon, 7)]}
+                       if tr.track_id in track_geo else {}),
                 }
                 for tr in tracks
             ],
@@ -63,6 +67,14 @@ class TelemetryWriter:
             },
             "events": [asdict(e) for e in lock.events],
         }
+        if "vehicle" in extras:
+            rec["vehicle"] = extras["vehicle"].as_dict()
+        if extras.get("target_geo") is not None:
+            g = extras["target_geo"]
+            rec["target_geo"] = {"lat": round(g.lat, 7), "lon": round(g.lon, 7),
+                                 "ground_range_m": round(g.ground_range_m, 1)}
+        if "gimbal_cmd" in extras:
+            rec["gimbal_cmd_dps"] = [round(v, 2) for v in extras["gimbal_cmd"]]
         self._fh.write(json.dumps(rec) + "\n")
 
     def summary(self) -> dict[str, Any]:

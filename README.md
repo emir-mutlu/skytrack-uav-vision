@@ -1,8 +1,10 @@
 # SkyTrack — UAV Target Detection, Tracking & Target Lock
 
 Real-time perception pipeline for UAV video: **detect → track → lock**, with an operator HUD,
-structured telemetry and a reproducible benchmark. Runs on a laptop CPU, scales to a GPU or an
-edge device (Jetson / ONNX / TensorRT) by swapping the detector.
+structured telemetry and a reproducible benchmark. Talks **MAVLink** to ArduPilot / PX4 flight
+controllers to geolocate targets and keep the locked target centred with the camera gimbal.
+Runs on a laptop CPU, scales to a GPU or an edge device (Jetson / ONNX / TensorRT) by swapping
+the detector.
 
 <p align="center">
   <img src="assets/demo.webp" alt="SkyTrack demo: search, acquire and lock on a moving target" width="100%">
@@ -19,7 +21,13 @@ edge device (Jetson / ONNX / TensorRT) by swapping the detector.
   minimum target size, hold time and grace period
 - **Human-in-the-loop** — the operator designates a track (click / TAB); by default the system
   only proposes candidates
-- **Centring error output** — normalised target offset for gimbal / camera follow
+- **Flight-controller integration (MAVLink)** — ArduPilot / PX4 over TCP, UDP or serial: live
+  position, attitude and gimbal telemetry, plus closed-loop **gimbal follow** (PID on angular
+  error, `MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW` rate commands)
+- **Target geolocation** — every track projected to latitude / longitude from the camera model,
+  gimbal and vehicle attitude, and altitude
+- **Hardware-free testing** — built-in MAVLink vehicle simulator and a pan/tilt synthetic camera
+  that closes the loop detector → lock → gimbal command → camera motion
 - **Operator HUD** — translucent panels with crisp TrueType text, lock-zone brackets, boresight
   reticle, circular acquisition progress, pulsing lock box, fading trails, motion vectors and a
   boresight-error indicator; resolution-independent layout from 480p to 4K, ~5–7 ms per 720p frame
@@ -28,7 +36,7 @@ edge device (Jetson / ONNX / TensorRT) by swapping the detector.
 - **Any video source** — files, webcams, **RTSP / UDP streams** (threaded latest-frame grabber,
   no latency build-up)
 - **Reproducible benchmark** — synthetic scene with ground truth (precision / recall / F1 / MOTA /
-  ID switches / latency), **28 pytest tests**, accuracy regression gate in CI
+  ID switches / latency), **38 pytest tests**, accuracy regression gate in CI
 - **Engineering** — installable package, YAML mission profiles, CLI, Docker image, GitHub Actions
   CI, ruff lint
 
@@ -44,8 +52,13 @@ flowchart LR
     T --> L[Target lock<br/>state machine]
     OP([Operator<br/>designate / release]) --> L
     L --> H[HUD]
-    L --> J[JSONL telemetry<br/>lock events, centring error]
+    L --> J[JSONL telemetry<br/>lock events, geolocation]
     H --> V[Display / MP4]
+    L --> G[Gimbal follow<br/>PID]
+    G -->|MAVLink: gimbal rates| FC[(ArduPilot / PX4<br/>flight controller)]
+    FC -->|MAVLink: position, attitude,<br/>gimbal attitude| GEO[Geolocation]
+    GEO --> J
+    GEO --> H
 ```
 
 ```
@@ -56,10 +69,14 @@ src/skytrack/
 ├── pipeline.py       orchestration, keyboard/mouse control, video writer
 ├── hud.py            overlay rendering
 ├── telemetry.py      JSONL + summary
+├── vehicle.py        MAVLink link: telemetry reader, gimbal commands
+├── gimbal.py         gimbal-follow PID controller
+├── geo.py            pixel -> lat/lon geolocation
+├── simvehicle.py     minimal MAVLink vehicle for tests and demos
 ├── sources.py        file / camera / threaded stream capture
-├── synthetic.py      ground-truth scene generator
+├── synthetic.py      ground-truth scene generator + pan/tilt camera
 ├── evaluate.py       detection + CLEAR-MOT metrics
-└── cli.py            `skytrack run | demo | eval | synth`
+└── cli.py            `skytrack run | demo | eval | synth | sim-vehicle`
 ```
 
 ## Quick start
@@ -69,10 +86,12 @@ python -m venv .venv
 .venv\Scripts\activate            # Linux/macOS: source .venv/bin/activate
 pip install -e ".[dev]"           # core: OpenCV + NumPy only
 pip install -e ".[yolo]"          # optional: deep-learning detector
+pip install -e ".[mavlink]"       # optional: flight-controller link (included in [dev])
 ```
 
 ```bash
 skytrack demo                                     # synthetic scene, interactive HUD
+skytrack demo --closed-loop                       # + simulated MAVLink vehicle and gimbal follow
 skytrack eval --config configs/demo.yaml          # benchmark against ground truth
 skytrack run -s flight.mp4 -c configs/recon.yaml --save runs/out.mp4
 skytrack run -s rtsp://192.168.1.10:8554/cam -c configs/counter_uas.yaml
@@ -93,6 +112,56 @@ skytrack run -s 0 --detector yolo --model yolo11n.pt   # webcam
 | Corner brackets | Tracks: teal = tracked, cyan = lock candidate, amber/red = designated target |
 | Amber ring / red box | Acquisition progress / confirmed lock |
 | Dashed line + error box | Target offset from the boresight, the signal a gimbal controller would centre |
+
+## Flight-controller integration (MAVLink)
+
+![MAVLink closed loop](assets/mavlink.png)
+
+SkyTrack runs as an **onboard-computer component** next to the autopilot (or on the ground
+station). It reads the vehicle state and, with `--gimbal-follow`, steers the camera gimbal so the
+designated target stays centred. Every track is geolocated, so a detection becomes a map
+coordinate in the telemetry log and on the HUD.
+
+| Direction | MAVLink messages |
+|---|---|
+| Autopilot → SkyTrack | `HEARTBEAT` (mode, armed), `GLOBAL_POSITION_INT`, `ATTITUDE`, `GIMBAL_DEVICE_ATTITUDE_STATUS` (gimbal v2) or `MOUNT_STATUS` (legacy) |
+| SkyTrack → Autopilot | `HEARTBEAT`, `MAV_CMD_SET_MESSAGE_INTERVAL` (stream rates), `MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW` (gimbal pitch/yaw **rates**) |
+
+**Without hardware, in one command.** A simulated vehicle flies a circle at 100 m and exposes a
+gimbal over real MAVLink/TCP; the synthetic camera pans with that gimbal, so the whole loop runs:
+
+```bash
+skytrack demo --closed-loop
+```
+
+Or run the simulated vehicle separately and connect to it like a real autopilot:
+
+```bash
+skytrack sim-vehicle                                         # terminal 1: tcp 127.0.0.1:5760
+skytrack demo --mavlink tcp:127.0.0.1:5760                   # terminal 2: telemetry + geolocation
+```
+
+**ArduPilot SITL.** SITL serves MAVLink on TCP 5760, the same address:
+
+```bash
+sim_vehicle.py -v ArduCopter --console --map                 # in an ArduPilot checkout
+skytrack run -s <camera stream> --mavlink tcp:127.0.0.1:5760 --gimbal-follow
+```
+
+Gimbal commands need a mount configured on the autopilot (`MNT1_TYPE`); see the ArduPilot
+camera-gimbal documentation.
+
+**Real vehicle.**
+
+| Link | Connection string |
+|---|---|
+| Pixhawk over USB | `--mavlink COM5` (Windows) · `--mavlink /dev/ttyACM0` (Linux) |
+| Companion-computer UART (Jetson / Raspberry Pi) | `--mavlink /dev/ttyTHS1` with `mavlink.baud: 921600` in the profile |
+| Telemetry radio / MAVProxy / mavlink-router output | `--mavlink udpin:0.0.0.0:14550` |
+
+Set the lens field of view with `--hfov` (or `camera.hfov_deg`); geolocation accuracy depends on
+it. Geolocation assumes flat terrain at the home altitude, which holds to a few metres for ranges
+below ~2 km over level ground.
 
 ## Mission profiles (`configs/`)
 
@@ -135,22 +204,24 @@ Each frame is one JSON line, ready for pandas, Grafana or a ground-station bridg
  "events": []}
 ```
 
-`lock.error` is the target's offset from image centre in `[-1, 1]` — the input a gimbal/camera
-controller needs to keep the target centred.
+`lock.error` is the target's offset from image centre in `[-1, 1]`, the input of the gimbal-follow
+controller. With a MAVLink link each record also carries `vehicle` (position, attitude, gimbal),
+per-track `geo` coordinates, `target_geo` and the `gimbal_cmd_dps` that were sent.
 
 ## Scope & responsible use
 
-SkyTrack is a **perception and decision-support** system. It detects, tracks and reports; it
-contains **no actuation, weapon-release or engagement logic**, and the default profiles keep a
-human operator in the loop for target designation. Integrators are responsible for complying with
+SkyTrack is a **perception and decision-support** system. It detects, tracks, geolocates and
+reports. Its only actuation is **pointing the camera gimbal**: it never commands vehicle motion,
+flight modes or arming, and it contains **no weapon-release or engagement logic**. The default
+profiles keep a human operator in the loop for target designation. Integrators are responsible for complying with
 applicable law, airspace rules and rules of engagement.
 
 ## Development
 
 ```bash
-pytest -q          # 28 tests incl. HUD rendering, end-to-end pipeline and accuracy regression gate
+pytest -q          # 38 tests incl. HUD, live MAVLink, closed-loop gimbal follow, accuracy gate
 ruff check src tests scripts
-python scripts/render_media.py   # regenerate README media (assets/hud.png, assets/demo.webp)
+python scripts/render_media.py   # regenerate README media (assets/*.png, assets/demo.webp)
 docker build -t skytrack . && docker run --rm -v %cd%/runs:/app/runs skytrack
 ```
 
@@ -158,7 +229,8 @@ docker build -t skytrack . && docker run --rm -v %cd%/runs:/app/runs skytrack
 
 - Camera-motion compensation (ECC / optical flow) before association, for fast-turning platforms
 - Appearance re-ID embeddings (DeepSORT / BoT-SORT) for long occlusions
-- MAVLink bridge: publish `lock.error` as gimbal rate commands, ingest UAV attitude/GPS for geo-located tracks
+- Gazebo + ArduPilot SITL camera for photorealistic closed-loop testing
+- Terrain (DEM) lookup for geolocation over hilly ground
 - Thermal (IR) model for night operation
 - Small-object tiling (SAHI) for high-altitude imagery
 
