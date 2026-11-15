@@ -281,7 +281,7 @@ def _vehicle_rows(vs: VehicleState, geo: GeoPoint | None, follow: bool,
         rows.append(("CAM", "FOLLOWING TARGET", CYAN))
     if geo is not None:
         rows.append(("TGT", f"{geo.lat:.6f} {geo.lon:.6f}", RED))
-        rows.append(("RNG", f"{geo.ground_range_m:.0f} m ground", RED))
+        rows.append(("RNG", f"{geo.ground_range_m:.0f} m   {geo.method.upper()}", RED))
     return rows
 
 

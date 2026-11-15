@@ -2,15 +2,16 @@
 
 A pixel is turned into a viewing ray with a pinhole model derived from the lens HFOV,
 rotated into the local North-East-Down frame using the gimbal and vehicle attitude,
-and intersected with a flat ground plane `alt_agl` metres below the camera.
+and intersected with the ground: either a flat plane `alt_agl` metres below the camera,
+or - when a terrain model (DEM) is supplied - the real terrain surface (see terrain.py).
 
 Conventions (aerospace, right-handed, FRD / NED):
     camera frame  x = optical axis, y = image right, z = image down
     pitch         positive = up, -90 deg = nadir
     yaw           positive = clockwise seen from above (towards east from north)
 
-Flat-earth assumption: accurate to a few metres for ranges below ~2 km over level
-terrain; a DEM lookup would be the next refinement for hilly areas.
+The flat model is accurate to a few metres for ranges below ~2 km over level ground;
+use a DEM for hills, slopes and valleys.
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ class GeoPoint:
     east_m: float
     ground_range_m: float
     slant_range_m: float
+    ground_alt_m: float | None = None  # terrain elevation AMSL at the target (DEM only)
+    method: str = "flat"  # "flat" | "dem"
 
 
 def _rx(a: float) -> np.ndarray:
@@ -83,14 +86,29 @@ def geolocate(
     aspect: float,
     stabilized: bool = True,
     max_range_m: float = 5000.0,
+    terrain=None,
+    cam_alt_amsl: float | None = None,
 ) -> GeoPoint | None:
     """Ground position of the pixel at normalised offset `err`, or None if the ray does
-    not hit the ground within `max_range_m` (at/above the horizon or too shallow)."""
-    if alt_agl <= 0.5:
-        return None
+    not hit the ground within `max_range_m` (at/above the horizon or too shallow).
+
+    With `terrain` (any object with `elevation(lat, lon)`) and `cam_alt_amsl`, the ray is
+    intersected with the terrain surface; where the DEM has no data the flat model is used."""
     ray = camera_to_ned(vehicle_rpy, gimbal_pitch_deg, gimbal_yaw_deg, stabilized) @ camera_ray(
         err, hfov_deg, aspect
     )
+    if terrain is not None and cam_alt_amsl is not None:
+        from .terrain import intersect
+
+        hit = intersect(lat, lon, cam_alt_amsl, ray, terrain, max_range_m)
+        if hit is not None:
+            north, east, ground_alt, slant = hit
+            dlat = math.degrees(north / EARTH_RADIUS_M)
+            dlon = math.degrees(east / (EARTH_RADIUS_M * math.cos(math.radians(lat))))
+            return GeoPoint(lat + dlat, lon + dlon, north, east, math.hypot(north, east), slant,
+                            ground_alt, "dem")
+    if alt_agl <= 0.5:
+        return None
     if ray[2] <= 1e-6:
         return None
     scale = alt_agl / ray[2]

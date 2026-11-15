@@ -72,7 +72,8 @@ class TelemetryWriter:
         if extras.get("target_geo") is not None:
             g = extras["target_geo"]
             rec["target_geo"] = {"lat": round(g.lat, 7), "lon": round(g.lon, 7),
-                                 "ground_range_m": round(g.ground_range_m, 1)}
+                                 "ground_range_m": round(g.ground_range_m, 1), "method": g.method,
+                                 "ground_alt_m": None if g.ground_alt_m is None else round(g.ground_alt_m, 1)}
         if "gimbal_cmd" in extras:
             rec["gimbal_cmd_dps"] = [round(v, 2) for v in extras["gimbal_cmd"]]
         self._fh.write(json.dumps(rec) + "\n")

@@ -46,6 +46,11 @@ class Pipeline:
         self._last_tracks: list[Track] = []
         self.link = None
         self.gimbal_ctl: GimbalController | None = None
+        self.terrain = None
+        if cfg.terrain.source == "hgt":
+            from .terrain import HgtTerrain
+
+            self.terrain = HgtTerrain(cfg.terrain.path)
         if cfg.mavlink.enabled:
             from .vehicle import MavlinkLink  # optional dependency (pymavlink)
 
@@ -80,7 +85,8 @@ class Pipeline:
             geo: dict[int, GeoPoint] = {}
             for tr in res.tracks:
                 pt = geolocate(TargetLock.centre_error(tr, shape), vs.lat, vs.lon, vs.alt_rel,
-                               (vs.roll, vs.pitch, vs.yaw), gp, gy, cam.hfov_deg, aspect, cam.stabilized)
+                               (vs.roll, vs.pitch, vs.yaw), gp, gy, cam.hfov_deg, aspect, cam.stabilized,
+                               terrain=self.terrain, cam_alt_amsl=vs.alt_amsl)
                 if pt is not None:
                     geo[tr.track_id] = pt
             res.extras["track_geo"] = geo

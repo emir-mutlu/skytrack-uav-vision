@@ -26,3 +26,30 @@ jobs:
         run: pytest -q
       - name: Benchmark
         run: skytrack eval --config configs/demo.yaml --frames 600
+
+  sitl:
+    name: ArduPilot SITL integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install opencv-python-headless
+          pip install -e ".[dev]"
+      - name: Download ArduCopter SITL (official stable build)
+        run: |
+          base=https://firmware.ardupilot.org/Copter/stable/SITL_x86_64_linux_gnu
+          mkdir -p sitl
+          curl -fsSL -o sitl/arducopter "$base/arducopter"
+          chmod +x sitl/arducopter
+          echo "firmware: $(curl -fsSL "$base/firmware-version.txt")"
+          curl -fsSL "$base/git-version.txt" | head -3
+      - name: SITL tests (telemetry, gimbal rate control, link-check)
+        env:
+          SKYTRACK_SITL_BIN: ${{ github.workspace }}/sitl/arducopter
+        run: pytest -q -s tests/test_sitl.py

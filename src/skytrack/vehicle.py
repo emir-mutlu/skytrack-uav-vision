@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import math
 import os
+import socket
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -36,6 +38,31 @@ def _mavutil():
     except ImportError as exc:  # pragma: no cover - optional extra
         raise ImportError("MAVLink support requires: pip install -e .[mavlink]") from exc
     return mavutil
+
+
+def open_connection(device: str, **kwargs):
+    """pymavlink connection with Windows UDP fixes applied.
+
+    * pymavlink binds `udpout:` sockets to the *destination* port on Windows, which
+      collides with a listener on the same machine (e.g. SkyTrack + a simulator or
+      MAVProxy on one PC). Rebind to an ephemeral port, as on Linux.
+    * Windows reports ICMP 'port unreachable' as WSAECONNRESET on the next UDP read;
+      turn that off so a peer restarting does not break the link.
+    """
+    mavutil = _mavutil()
+    conn = mavutil.mavlink_connection(device, **kwargs)
+    if os.name == "nt" and isinstance(conn, mavutil.mavudp):
+        if not conn.udp_server:
+            conn.port.close()
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.bind(("0.0.0.0", 0))
+            sock.setblocking(False)
+            conn.port, conn.fd = sock, sock.fileno()
+        try:
+            conn.port.ioctl(socket.SIO_UDP_CONNRESET, False)
+        except (AttributeError, OSError):  # pragma: no cover - non-Windows builds
+            pass
+    return conn
 
 
 @dataclass
@@ -101,14 +128,17 @@ class MavlinkLink:
         self.conn = None
         self.messages_rx = 0
         self.commands_tx = 0
+        self.rx_counts: Counter[str] = Counter()  # per message type, for link diagnostics
+        self.acks: dict[int, int] = {}  # command id -> last MAV_RESULT
 
     # ------------------------------------------------------------------ lifecycle
     def start(self) -> MavlinkLink:
         mavutil = _mavutil()
         self._mav = mavutil.mavlink
-        self.conn = mavutil.mavlink_connection(
+        self.conn = open_connection(
             self.cfg.connection, baud=self.cfg.baud, source_system=self.cfg.source_system,
             source_component=self.cfg.source_component, autoreconnect=True,
+            retries=self.cfg.connect_retries,
         )
         self._mode_string = mavutil.mode_string_v10
         self._thread = threading.Thread(target=self._loop, name="mavlink-rx", daemon=True)
@@ -175,6 +205,7 @@ class MavlinkLink:
             if msg.get_srcSystem() != self.cfg.target_system:
                 continue
             self.messages_rx += 1
+            self.rx_counts[msg.get_type()] += 1
             self._handle(msg)
 
     def _handle(self, msg) -> None:
@@ -213,6 +244,9 @@ class MavlinkLink:
                 s.gimbal_pitch_deg, s.gimbal_yaw_deg = math.degrees(gp), wrap180(yaw_deg)
                 s.gimbal_source = "gimbal_v2"
                 self._have_gimbal_v2 = True
+                return
+            elif kind == "COMMAND_ACK":
+                self.acks[msg.command] = msg.result
                 return
             elif kind == "MOUNT_STATUS" and not self._have_gimbal_v2:
                 s.gimbal_pitch_deg = msg.pointing_a / 100.0

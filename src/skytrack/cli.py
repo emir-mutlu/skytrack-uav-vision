@@ -7,6 +7,7 @@
     skytrack synth --out data/synthetic.mp4
     skytrack sim-vehicle                                   # MAVLink test vehicle on tcp:5760
     skytrack demo --mavlink tcp:127.0.0.1:5760 --gimbal-follow
+    skytrack link-check --mavlink COM5 --gimbal-test         # hardware bring-up
 """
 
 from __future__ import annotations
@@ -161,6 +162,15 @@ def cmd_sim_vehicle(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_link_check(args: argparse.Namespace) -> int:
+    from .linkcheck import run_link_check
+
+    cfg = load_config(args.config, {"mavlink": {"enabled": True, "connection": args.mavlink,
+                                                **({"baud": args.baud} if args.baud else {})}}).mavlink
+    ok = run_link_check(cfg, window_s=args.window, timeout_s=args.timeout, gimbal_test=args.gimbal_test)
+    return 0 if ok else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="skytrack", description="UAV target detection, tracking & lock")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -191,6 +201,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--speed", type=float, default=10.0)
     p.add_argument("--duration", type=float, help="stop after N seconds (default: run until Ctrl+C)")
     p.set_defaults(func=cmd_sim_vehicle)
+
+    p = sub.add_parser("link-check", help="diagnose the flight-controller link before a flight")
+    p.add_argument("--mavlink", default="udpin:0.0.0.0:14550", metavar="CONN")
+    p.add_argument("--baud", type=int)
+    p.add_argument("--config", "-c")
+    p.add_argument("--window", type=float, default=5.0, help="seconds to measure stream rates")
+    p.add_argument("--timeout", type=float, default=30.0, help="seconds to wait for a heartbeat")
+    p.add_argument("--gimbal-test", action="store_true", help="sweep the gimbal yaw and verify it moved")
+    p.set_defaults(func=cmd_link_check)
 
     p = sub.add_parser("synth", help="export the synthetic scene as a video file")
     p.add_argument("--out", default="data/synthetic.mp4")

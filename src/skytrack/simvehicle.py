@@ -6,6 +6,7 @@ streaming HEARTBEAT, GLOBAL_POSITION_INT, ATTITUDE and GIMBAL_DEVICE_ATTITUDE_ST
 and a gimbal that integrates MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW rate commands.
 
     skytrack sim-vehicle      # serves MAVLink on tcp 127.0.0.1:5760, like ArduPilot SITL
+    skytrack sim-vehicle --connection udpout:127.0.0.1:14550   # like a MAVProxy UDP output
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import math
 import threading
 import time
 
-from .vehicle import _mavutil, wrap180
+from .vehicle import _mavutil, open_connection, wrap180
 
 SITL_HOME = (-35.363261, 149.165230, 584.0)  # ArduPilot's default SITL home (lat, lon, amsl)
 
@@ -55,8 +56,7 @@ class SimVehicle:
     def start(self) -> SimVehicle:
         mavutil = _mavutil()
         self._mav = mavutil.mavlink
-        self.conn = mavutil.mavlink_connection(self.connection, source_system=self.system_id,
-                                               source_component=1)
+        self.conn = open_connection(self.connection, source_system=self.system_id, source_component=1)
         self._thread = threading.Thread(target=self._loop, name="sim-vehicle", daemon=True)
         self._thread.start()
         return self

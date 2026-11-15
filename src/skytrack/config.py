@@ -58,6 +58,12 @@ class CameraConfig:
 
 
 @dataclass
+class TerrainConfig:
+    source: str = "flat"  # "flat" (ground at home altitude) | "hgt" (SRTM / NASADEM tiles)
+    path: str | None = None  # directory with *.hgt tiles when source = "hgt"
+
+
+@dataclass
 class GimbalConfig:
     follow: bool = False  # keep the designated target centred by commanding gimbal rates
     kp: float = 2.0  # (deg/s) per degree of angular error
@@ -81,6 +87,7 @@ class MavlinkConfig:
     target_component: int = 1  # autopilot (acts as gimbal manager)
     stream_hz: float = 10.0  # requested rate for position / attitude / gimbal messages
     heartbeat_timeout: float = 3.0
+    connect_retries: int = 10  # TCP connect attempts (1 s apart) - SITL may still be booting
     geolocate: bool = True
     gimbal: GimbalConfig = field(default_factory=GimbalConfig)
 
@@ -100,6 +107,7 @@ class Config:
     tracker: TrackerConfig = field(default_factory=TrackerConfig)
     lock: LockConfig = field(default_factory=LockConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
+    terrain: TerrainConfig = field(default_factory=TerrainConfig)
     mavlink: MavlinkConfig = field(default_factory=MavlinkConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
 
@@ -139,5 +147,9 @@ def _validate(cfg: Config) -> None:
     x1, y1, x2, y2 = cfg.lock.zone
     if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
         raise ValueError(f"lock.zone must be normalised (x1<x2, y1<y2 in [0,1]), got {cfg.lock.zone}")
+    if cfg.terrain.source not in {"flat", "hgt"}:
+        raise ValueError(f"terrain.source must be 'flat' or 'hgt', got {cfg.terrain.source!r}")
+    if cfg.terrain.source == "hgt" and not cfg.terrain.path:
+        raise ValueError("terrain.path is required when terrain.source = 'hgt'")
     if not 0 < cfg.detector.conf < 1:
         raise ValueError("detector.conf must be in (0, 1)")

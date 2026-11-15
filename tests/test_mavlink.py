@@ -143,3 +143,52 @@ def test_closed_loop_gimbal_follow_keeps_target_centred(tmp_path):
     assert all(r["vehicle"]["connected"] for r in tail)
     assert all(r.get("target_geo") for r in tail)
     assert abs(sim.gimbal_pitch + 45.0) + abs(sim.gimbal_yaw) > 1.0  # the gimbal actually moved
+
+
+def test_udp_link_on_one_machine():
+    """udpin listener + udpout peer on the same host (MAVProxy-style). Regression test for
+    pymavlink binding udpout sockets to the destination port on Windows."""
+    pytest.importorskip("pymavlink")
+    from skytrack.simvehicle import SimVehicle
+    from skytrack.vehicle import MavlinkLink
+
+    link = MavlinkLink(MavlinkConfig(enabled=True, connection="udpin:127.0.0.1:14583")).start()
+    sim = SimVehicle(connection="udpout:127.0.0.1:14583").start()
+    try:
+        assert link.wait_connected(10)
+        for _ in range(10):
+            link.send_gimbal_rates(0.0, 30.0)
+            time.sleep(0.05)
+        time.sleep(0.3)
+        assert sim.gimbal_commands >= 5
+        assert link.acks.get(1000) == 0
+    finally:
+        sim.stop()
+        link.stop()
+
+
+def test_link_check_against_sim_vehicle():
+    pytest.importorskip("pymavlink")
+    from skytrack.linkcheck import run_link_check
+    from skytrack.simvehicle import SimVehicle
+
+    sim = SimVehicle(connection="tcpin:127.0.0.1:5784").start()
+    lines: list[str] = []
+    try:
+        ok = run_link_check(MavlinkConfig(enabled=True, connection="tcp:127.0.0.1:5784"),
+                            window_s=1.0, timeout_s=10.0, gimbal_test=True, out=lines.append)
+    finally:
+        sim.stop()
+    assert ok, "\n".join(lines)
+    text = "\n".join(lines)
+    assert "gimbal yaw moved" in text and "RESULT: PASS" in text
+
+
+def test_link_check_reports_missing_autopilot():
+    pytest.importorskip("pymavlink")
+    from skytrack.linkcheck import run_link_check
+
+    lines: list[str] = []
+    ok = run_link_check(MavlinkConfig(enabled=True, connection="udpin:127.0.0.1:14584"),
+                        window_s=0.5, timeout_s=1.0, out=lines.append)
+    assert not ok and any("no autopilot HEARTBEAT" in line for line in lines)

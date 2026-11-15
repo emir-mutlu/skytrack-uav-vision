@@ -1,5 +1,9 @@
 # SkyTrack — UAV Target Detection, Tracking & Target Lock
 
+[![CI](https://github.com/emir-mutlu/skytrack-uav-vision/actions/workflows/ci.yml/badge.svg)](https://github.com/emir-mutlu/skytrack-uav-vision/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue)
+![ArduPilot SITL](https://img.shields.io/badge/tested%20with-ArduPilot%20SITL-orange)
+
 Real-time perception pipeline for UAV video: **detect → track → lock**, with an operator HUD,
 structured telemetry and a reproducible benchmark. Talks **MAVLink** to ArduPilot / PX4 flight
 controllers to geolocate targets and keep the locked target centred with the camera gimbal.
@@ -25,7 +29,12 @@ the detector.
   position, attitude and gimbal telemetry, plus closed-loop **gimbal follow** (PID on angular
   error, `MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW` rate commands)
 - **Target geolocation** — every track projected to latitude / longitude from the camera model,
-  gimbal and vehicle attitude, and altitude
+  gimbal and vehicle attitude, and altitude; **terrain-aware** with SRTM / NASADEM `.hgt` tiles
+  (ray marching + bisection, NumPy only), flat-ground fallback where the DEM has no data
+- **Tested against real ArduPilot** — CI boots the official ArduCopter SITL firmware and checks
+  telemetry, gimbal rate control and the link diagnostics end to end
+- **Hardware bring-up tool** — `skytrack link-check` verifies heartbeat, stream rates, GPS,
+  gimbal reporting and gimbal motion with PASS / WARN / FAIL hints before the first flight
 - **Hardware-free testing** — built-in MAVLink vehicle simulator and a pan/tilt synthetic camera
   that closes the loop detector → lock → gimbal command → camera motion
 - **Operator HUD** — translucent panels with crisp TrueType text, lock-zone brackets, boresight
@@ -36,7 +45,7 @@ the detector.
 - **Any video source** — files, webcams, **RTSP / UDP streams** (threaded latest-frame grabber,
   no latency build-up)
 - **Reproducible benchmark** — synthetic scene with ground truth (precision / recall / F1 / MOTA /
-  ID switches / latency), **38 pytest tests**, accuracy regression gate in CI
+  ID switches / latency), **50 pytest tests**, accuracy regression gate in CI
 - **Engineering** — installable package, YAML mission profiles, CLI, Docker image, GitHub Actions
   CI, ruff lint
 
@@ -72,11 +81,13 @@ src/skytrack/
 ├── vehicle.py        MAVLink link: telemetry reader, gimbal commands
 ├── gimbal.py         gimbal-follow PID controller
 ├── geo.py            pixel -> lat/lon geolocation
+├── terrain.py        flat / SRTM .hgt terrain, ray-terrain intersection
+├── linkcheck.py      flight-controller bring-up diagnostics
 ├── simvehicle.py     minimal MAVLink vehicle for tests and demos
 ├── sources.py        file / camera / threaded stream capture
 ├── synthetic.py      ground-truth scene generator + pan/tilt camera
 ├── evaluate.py       detection + CLEAR-MOT metrics
-└── cli.py            `skytrack run | demo | eval | synth | sim-vehicle`
+└── cli.py            `skytrack run | demo | eval | synth | sim-vehicle | link-check`
 ```
 
 ## Quick start
@@ -141,6 +152,9 @@ skytrack sim-vehicle                                         # terminal 1: tcp 1
 skytrack demo --mavlink tcp:127.0.0.1:5760                   # terminal 2: telemetry + geolocation
 ```
 
+UDP works the same way, including both ends on one Windows PC (`skytrack sim-vehicle --connection
+udpout:127.0.0.1:14550` with `--mavlink udpin:0.0.0.0:14550`).
+
 **ArduPilot SITL.** SITL serves MAVLink on TCP 5760, the same address:
 
 ```bash
@@ -149,7 +163,9 @@ skytrack run -s <camera stream> --mavlink tcp:127.0.0.1:5760 --gimbal-follow
 ```
 
 Gimbal commands need a mount configured on the autopilot (`MNT1_TYPE`); see the ArduPilot
-camera-gimbal documentation.
+camera-gimbal documentation. The CI job `ArduPilot SITL integration` does exactly this with the
+official ArduCopter stable SITL build and a servo gimbal (`tests/test_sitl.py`); run it locally
+on Linux with `SKYTRACK_SITL_BIN=./arducopter pytest tests/test_sitl.py -s`.
 
 **Real vehicle.**
 
@@ -159,9 +175,47 @@ camera-gimbal documentation.
 | Companion-computer UART (Jetson / Raspberry Pi) | `--mavlink /dev/ttyTHS1` with `mavlink.baud: 921600` in the profile |
 | Telemetry radio / MAVProxy / mavlink-router output | `--mavlink udpin:0.0.0.0:14550` |
 
+**First session on new hardware.** Before flying, run the bring-up check (props off for the
+gimbal test):
+
+```bash
+skytrack link-check --mavlink COM5 --gimbal-test
+```
+
+```
+SkyTrack link check -> COM5
+  [PASS] heartbeat: mode GUIDED, ARMED, system 1
+  [PASS] GLOBAL_POSITION_INT             16.0 Hz
+  [PASS] ATTITUDE                        16.0 Hz
+  [INFO] GIMBAL_DEVICE_ATTITUDE_STATUS   16.0 Hz
+  [PASS] position -35.3619422, 149.1655695  alt 100.0 m rel / 684.0 m AMSL
+  [PASS] gimbal attitude (gimbal_v2): pitch -45.0, yaw +0.0
+  [PASS] DO_GIMBAL_MANAGER_PITCHYAW accepted
+  [PASS] gimbal yaw moved 22.5 deg on a 15 deg/s x 1.5 s command
+RESULT: PASS
+```
+
+Every FAIL / WARN line says what to fix (serial protocol, baud, GPS fix, `MNT1_TYPE`, firmware
+version); the command exits non-zero on failure, so it can gate a pre-flight script.
+
+### Terrain-aware geolocation
+
 Set the lens field of view with `--hfov` (or `camera.hfov_deg`); geolocation accuracy depends on
-it. Geolocation assumes flat terrain at the home altitude, which holds to a few metres for ranges
-below ~2 km over level ground.
+it. By default the ground is a plane at the home altitude, accurate to a few metres below ~2 km
+over level ground. Over hills, slopes or valleys, point SkyTrack at SRTM / NASADEM tiles
+(`N41E028.hgt`, 1" or 3" grids from USGS EarthExplorer or OpenTopography):
+
+```yaml
+terrain:
+  source: hgt
+  path: data/dem          # directory of *.hgt tiles
+```
+
+The camera ray is marched across the DEM (bilinear elevation lookup) and the first ground
+crossing is refined by bisection, so a target on a slope facing the camera lands where the line
+of sight actually meets the ground, and a ridge blocks what lies behind it. Cells without data
+fall back to the flat model; the HUD and telemetry state which model (`DEM` / `FLAT`) each
+coordinate came from.
 
 ## Mission profiles (`configs/`)
 
@@ -219,7 +273,7 @@ applicable law, airspace rules and rules of engagement.
 ## Development
 
 ```bash
-pytest -q          # 38 tests incl. HUD, live MAVLink, closed-loop gimbal follow, accuracy gate
+pytest -q          # 50 tests incl. HUD, live MAVLink, DEM, closed-loop gimbal follow, accuracy gate
 ruff check src tests scripts
 python scripts/render_media.py   # regenerate README media (assets/*.png, assets/demo.webp)
 docker build -t skytrack . && docker run --rm -v %cd%/runs:/app/runs skytrack
@@ -230,7 +284,7 @@ docker build -t skytrack . && docker run --rm -v %cd%/runs:/app/runs skytrack
 - Camera-motion compensation (ECC / optical flow) before association, for fast-turning platforms
 - Appearance re-ID embeddings (DeepSORT / BoT-SORT) for long occlusions
 - Gazebo + ArduPilot SITL camera for photorealistic closed-loop testing
-- Terrain (DEM) lookup for geolocation over hilly ground
+- Multi-target geolocation fusion over time (track-level position filter) for metre-level fixes
 - Thermal (IR) model for night operation
 - Small-object tiling (SAHI) for high-altitude imagery
 
