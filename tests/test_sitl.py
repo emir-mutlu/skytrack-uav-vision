@@ -3,6 +3,9 @@ Linux). Skipped unless SKYTRACK_SITL_BIN points at an `arducopter` SITL binary; 
 the official stable build from firmware.ardupilot.org.
 
     SKYTRACK_SITL_BIN=./arducopter pytest tests/test_sitl.py -s
+
+Covers the MAVLink link, gimbal rate control, the link-check diagnostics and the web
+console end to end against the real firmware.
 """
 
 import os
@@ -103,3 +106,66 @@ def test_sitl_link_check_passes(sitl):
                         window_s=3.0, timeout_s=60.0, gimbal_test=True, out=lines.append)
     print("\n".join(lines))
     assert ok, "\n".join(lines)
+
+
+def test_sitl_console_with_real_autopilot(sitl):
+    """The operator console end to end against ArduPilot firmware: vehicle panel fed by real
+    telemetry, gimbal follow driving the SITL mount, and an operator command over the
+    console's HTTP API. Uses SITL's third MAVLink port (SERIAL2, tcp 5763)."""
+    import http.client
+    import json
+
+    from skytrack.config import load_config
+    from skytrack.console import ConsoleServer, ConsoleSession
+    from skytrack.synthetic import SyntheticScene
+
+    cfg = load_config("configs/demo.yaml", {
+        "output": {"show": False},
+        "mavlink": {"enabled": True, "connection": "tcp:127.0.0.1:5763", "connect_retries": 30,
+                    "gimbal": {"follow": True}}})
+    scene = SyntheticScene(seed=7)
+    session = ConsoleSession(cfg, (f for f, _ in scene.frames(100_000)), 30.0, False, "SITL").start()
+    server = ConsoleServer(session, "127.0.0.1", 0).start_background()
+    port = server.httpd.server_address[1]
+
+    def request(method, path, body=None):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        headers = {"Content-Type": "application/json"} if body is not None else {}
+        conn.request(method, path, body=None if body is None else json.dumps(body), headers=headers)
+        resp = conn.getresponse()
+        data = json.loads(resp.read() or b"{}")
+        conn.close()
+        return resp.status, data
+
+    def state():
+        return request("GET", "/api/state")[1]
+
+    def vehicle():
+        return state().get("vehicle") or {}
+
+    try:
+        assert _wait(lambda: vehicle().get("connected"), 60), f"console never saw SITL: {state()}"
+        assert _wait(lambda: vehicle().get("lat") is not None and abs(vehicle()["lat"] - HOME[0]) < 1e-3, 60)
+        v = vehicle()
+        print("console vehicle panel:", v)
+        assert v["mode"] and abs(v["lon"] - HOME[1]) < 1e-3 and abs(v["alt_amsl"] - HOME[2]) < 20
+        assert any(e["kind"] == "link_up" for e in state()["events"])
+
+        assert _wait(lambda: vehicle().get("gimbal_pitch") is not None, 30), "no gimbal attitude in the console"
+        p0, y0 = vehicle()["gimbal_pitch"], vehicle()["gimbal_yaw"]
+        assert _wait(lambda: state()["gimbal"]["active"], 30), f"follow never engaged: {state()['lock']}"
+
+        def moved():
+            g = vehicle()
+            return abs(g["gimbal_pitch"] - p0) + abs(g["gimbal_yaw"] - y0) > 3.0
+
+        assert _wait(moved, 20), f"SITL gimbal did not move: start {p0}/{y0}, now {vehicle()}, {state()['gimbal']}"
+        print(f"SITL gimbal moved from {p0:+.1f}/{y0:+.1f} to "
+              f"{vehicle()['gimbal_pitch']:+.1f}/{vehicle()['gimbal_yaw']:+.1f} under console control")
+
+        assert request("POST", "/api/command", {"cmd": "follow", "on": False}) == (200, {"ok": True})
+        assert _wait(lambda: not state()["gimbal"]["follow"], 5)
+        assert any(e["kind"] == "follow_off" for e in state()["events"])
+    finally:
+        server.shutdown()
+        session.stop()

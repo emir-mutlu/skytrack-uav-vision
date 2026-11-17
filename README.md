@@ -33,7 +33,7 @@ to a GPU or an edge device (Jetson / ONNX / TensorRT) by swapping the detector.
   gimbal and vehicle attitude, and altitude; **terrain-aware** with SRTM / NASADEM `.hgt` tiles
   (ray marching + bisection, NumPy only), flat-ground fallback where the DEM has no data
 - **Tested against real ArduPilot** — CI boots the official ArduCopter SITL firmware and checks
-  telemetry, gimbal rate control and the link diagnostics end to end
+  telemetry, gimbal rate control, the link diagnostics and the operator console end to end
 - **Hardware bring-up tool** — `skytrack link-check` verifies heartbeat, stream rates, GPS,
   gimbal reporting and gimbal motion with PASS / WARN / FAIL hints before the first flight
 - **Web operator console** — a browser ground-control station: live annotated video with
@@ -51,7 +51,7 @@ to a GPU or an edge device (Jetson / ONNX / TensorRT) by swapping the detector.
   no latency build-up)
 - **Reproducible benchmark** — procedural aerial scene (forest, roads with traffic, buildings,
   rotating target boards, a drifting cloud) with ground truth: precision / recall / F1 / MOTA /
-  ID switches / latency; **56 pytest tests**, accuracy regression gate in CI
+  ID switches / latency; **57 pytest tests**, accuracy regression gate in CI
 - **Engineering** — installable package, YAML mission profiles, CLI, Docker image, GitHub Actions
   CI, ruff lint
 
@@ -316,7 +316,7 @@ applicable law, airspace rules and rules of engagement.
 ## Development
 
 ```bash
-pytest -q          # 56 tests incl. console API, HUD, live MAVLink, DEM, closed-loop gimbal follow
+pytest -q          # 57 tests incl. console API, HUD, live MAVLink, DEM, closed-loop gimbal follow
 ruff check src tests scripts
 python scripts/render_media.py   # regenerate README media (assets/*.png, assets/demo.webp)
 docker build -t skytrack . && docker run --rm -v %cd%/runs:/app/runs skytrack
