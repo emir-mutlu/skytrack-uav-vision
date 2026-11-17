@@ -39,12 +39,15 @@ class SimVehicle:
         rate_hz: float = 20.0,
         gimbal_pitch_deg: float = -45.0,
         system_id: int = 1,
+        pitch_limits: tuple[float, float] = (-90.0, 30.0),
+        yaw_limits: tuple[float, float] | None = None,
     ):
         self.connection = connection
         self.home, self.altitude, self.radius, self.speed = home, altitude, radius, speed
         self.rate_hz = rate_hz
         self.system_id = system_id
         self.gimbal_pitch = gimbal_pitch_deg
+        self.pitch_limits, self.yaw_limits = pitch_limits, yaw_limits
         self.gimbal_yaw = 0.0
         self._rates = (0.0, 0.0)
         self._rate_t = 0.0
@@ -80,8 +83,11 @@ class SimVehicle:
             self._drain()
             if now - self._rate_t > 1.0:  # gimbal managers stop on command timeout
                 self._rates = (0.0, 0.0)
-            self.gimbal_pitch = max(-90.0, min(30.0, self.gimbal_pitch + self._rates[0] * dt))
-            self.gimbal_yaw = wrap180(self.gimbal_yaw + self._rates[1] * dt)
+            lo, hi = self.pitch_limits
+            self.gimbal_pitch = max(lo, min(hi, self.gimbal_pitch + self._rates[0] * dt))
+            yaw = self.gimbal_yaw + self._rates[1] * dt
+            self.gimbal_yaw = wrap180(yaw) if self.yaw_limits is None else max(self.yaw_limits[0],
+                                                                                min(self.yaw_limits[1], yaw))
 
             boot_ms = int(t * 1000) & 0xFFFFFFFF
             if now - last_hb >= 1.0:

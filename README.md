@@ -7,8 +7,8 @@
 Real-time perception pipeline for UAV video: **detect → track → lock**, with an operator HUD,
 structured telemetry and a reproducible benchmark. Talks **MAVLink** to ArduPilot / PX4 flight
 controllers to geolocate targets and keep the locked target centred with the camera gimbal.
-Runs on a laptop CPU, scales to a GPU or an edge device (Jetson / ONNX / TensorRT) by swapping
-the detector.
+An operator works it from a browser-based ground-control console. Runs on a laptop CPU, scales
+to a GPU or an edge device (Jetson / ONNX / TensorRT) by swapping the detector.
 
 <p align="center">
   <img src="assets/demo.webp" alt="SkyTrack demo: search, acquire and lock on a moving target" width="100%">
@@ -16,8 +16,9 @@ the detector.
 
 ## Features
 
-- **Pluggable detectors** — a lightweight OpenCV shape detector (CLAHE, auto-Canny, containment
-  NMS, confidence score; no GPU or training data needed) **or** Ultralytics **YOLO11**
+- **Pluggable detectors** — a lightweight OpenCV shape detector (CLAHE, auto-Canny, rotation-invariant
+  shape test on the minimum-area rectangle, containment NMS, confidence score; no GPU or training
+  data needed) **or** Ultralytics **YOLO11**
   (COCO / VisDrone / custom drone weights, ONNX / TensorRT export)
 - **Kalman-filter multi-object tracker** — SORT family, Hungarian / greedy IoU association,
   persistent IDs, velocity estimates, coasting through short dropouts
@@ -35,6 +36,10 @@ the detector.
   telemetry, gimbal rate control and the link diagnostics end to end
 - **Hardware bring-up tool** — `skytrack link-check` verifies heartbeat, stream rates, GPS,
   gimbal reporting and gimbal motion with PASS / WARN / FAIL hints before the first flight
+- **Web operator console** — a browser ground-control station: live annotated video with
+  click-to-designate, tactical plot (vehicle, camera footprint, geolocated targets), lock status,
+  track table, trend charts, event log and a day / night display; standard library only
+  (MJPEG + Server-Sent Events + a JSON command API)
 - **Hardware-free testing** — built-in MAVLink vehicle simulator and a pan/tilt synthetic camera
   that closes the loop detector → lock → gimbal command → camera motion
 - **Operator HUD** — translucent panels with crisp TrueType text, lock-zone brackets, boresight
@@ -44,8 +49,9 @@ the detector.
 - **JSONL telemetry** — per-frame tracks and lock state, lock events, run summary
 - **Any video source** — files, webcams, **RTSP / UDP streams** (threaded latest-frame grabber,
   no latency build-up)
-- **Reproducible benchmark** — synthetic scene with ground truth (precision / recall / F1 / MOTA /
-  ID switches / latency), **50 pytest tests**, accuracy regression gate in CI
+- **Reproducible benchmark** — procedural aerial scene (forest, roads with traffic, buildings,
+  rotating target boards, a drifting cloud) with ground truth: precision / recall / F1 / MOTA /
+  ID switches / latency; **56 pytest tests**, accuracy regression gate in CI
 - **Engineering** — installable package, YAML mission profiles, CLI, Docker image, GitHub Actions
   CI, ruff lint
 
@@ -84,10 +90,12 @@ src/skytrack/
 ├── terrain.py        flat / SRTM .hgt terrain, ray-terrain intersection
 ├── linkcheck.py      flight-controller bring-up diagnostics
 ├── simvehicle.py     minimal MAVLink vehicle for tests and demos
+├── console/          web operator console: server.py (HTTP, MJPEG, SSE, commands),
+│                     session.py (pipeline thread), static/ (UI)
 ├── sources.py        file / camera / threaded stream capture
-├── synthetic.py      ground-truth scene generator + pan/tilt camera
+├── synthetic.py      procedural aerial scene with ground truth + pan/tilt camera
 ├── evaluate.py       detection + CLEAR-MOT metrics
-└── cli.py            `skytrack run | demo | eval | synth | sim-vehicle | link-check`
+└── cli.py            `skytrack run | demo | console | eval | synth | sim-vehicle | link-check`
 ```
 
 ## Quick start
@@ -103,6 +111,7 @@ pip install -e ".[mavlink]"       # optional: flight-controller link (included i
 ```bash
 skytrack demo                                     # synthetic scene, interactive HUD
 skytrack demo --closed-loop                       # + simulated MAVLink vehicle and gimbal follow
+skytrack console                                  # browser ground-control console (simulation)
 skytrack eval --config configs/demo.yaml          # benchmark against ground truth
 skytrack run -s flight.mp4 -c configs/recon.yaml --save runs/out.mp4
 skytrack run -s rtsp://192.168.1.10:8554/cam -c configs/counter_uas.yaml
@@ -111,6 +120,37 @@ skytrack run -s 0 --detector yolo --model yolo11n.pt   # webcam
 
 **Controls:** left-click a box or `TAB` to designate a target · `R` release · `SPACE` pause · `Q` quit.
 `--auto-lock` lets the system pick the candidate itself (useful for camera-follow tests).
+
+## Operator console
+
+![SkyTrack Ground Control console](assets/console.png)
+
+`skytrack console` starts the pipeline and opens a ground-control console in the browser. With the
+default `sim` source it flies the simulated MAVLink vehicle, so every panel is live without
+hardware; point it at a real camera and autopilot the same way as `skytrack run`:
+
+```bash
+skytrack console                                                    # simulation, opens the browser
+skytrack console -s rtsp://192.168.1.10:8554/cam -c configs/recon.yaml --mavlink udpin:0.0.0.0:14550
+```
+
+| Panel | What it shows |
+|---|---|
+| Camera | Annotated live feed; click a target to designate it. Release (`R`), pause (`Space`), gimbal follow (`F`), auto designation (`A`) |
+| Target lock | Lock state, target, lock time and the boresight error on a scope whose ring fills during acquisition |
+| Tactical plot | North-up plot around the vehicle: range rings, camera footprint on the ground, geolocated targets, line of sight, vehicle track |
+| Vehicle | Mode, arming, altitude, speed, heading, gimbal attitude and rate command, target position with a map link |
+| Tracks | Every confirmed track with confidence, age and range; click a row to designate |
+| Trends / Events | Boresight error and detector latency over the last 30 s; lock, designation and link events |
+
+The console is a single page served by the Python standard library: video over MJPEG, state over
+Server-Sent Events at 10 Hz, commands as JSON (`POST /api/command`), and `/api/state`,
+`/api/history` and `/api/snapshot.jpg` for tools and tests. `?poll` switches to plain polling for
+networks that block streaming, and `?theme=day` opens the daylight display.
+
+It listens on `127.0.0.1` by default. Commands are only accepted as `application/json` with a
+matching origin, so another web page open in the operator's browser cannot designate targets or
+move the gimbal; `--host 0.0.0.0` exposes it to the network and prints a warning.
 
 ## Operator HUD
 
@@ -234,18 +274,21 @@ python scripts/train.py --data VisDrone.yaml --model yolo11n.pt --imgsz 960 --ep
 
 ## Benchmark (synthetic, 600 frames, 1200 GT objects, CPU)
 
-Classic detector + Kalman tracker on the built-in scene (camera jitter, sensor noise, distractor
-shapes, and a periodic haze band that deliberately hides targets):
+Classic detector + Kalman tracker on the built-in procedural aerial scene: forest canopy, roads,
+buildings and cars driving as distractors, two rotating target boards, camera shake, optics blur,
+sensor noise, and a cloud that drifts through the view every 12 s to hide targets on purpose:
 
 | Metric | Value |
 |---|---|
-| Detection precision / recall / F1 | 0.905 / 0.889 / **0.897** |
-| Tracking MOTA | **0.80** |
-| ID switches | 1 |
-| Latency (mean / p95) | **6.2 ms / 7.9 ms** per 960×540 frame |
+| Detection precision / recall / F1 | 0.981 / 0.968 / **0.974** |
+| Tracking MOTA | **0.935** |
+| ID switches | 0 |
+| Latency (mean / p95) | **10.4 ms / 12.8 ms** per 960×540 frame |
 
-Reproduce with `skytrack eval --config configs/demo.yaml --frames 600`. Most misses come from the
-haze band; without it F1 is ≈0.95 (first 300 frames).
+Reproduce with `skytrack eval --config configs/demo.yaml --frames 600`. The misses come from the
+cloud passes; the cloud-free first 300 frames score F1 1.00. The shape test runs on the
+minimum-area rotated rectangle, so the boards are found at any rotation while cars (elongated)
+and tree crowns (round) are rejected at any heading.
 
 ## Telemetry
 
@@ -273,10 +316,11 @@ applicable law, airspace rules and rules of engagement.
 ## Development
 
 ```bash
-pytest -q          # 50 tests incl. HUD, live MAVLink, DEM, closed-loop gimbal follow, accuracy gate
+pytest -q          # 56 tests incl. console API, HUD, live MAVLink, DEM, closed-loop gimbal follow
 ruff check src tests scripts
 python scripts/render_media.py   # regenerate README media (assets/*.png, assets/demo.webp)
 docker build -t skytrack . && docker run --rm -v %cd%/runs:/app/runs skytrack
+docker run --rm -p 8080:8080 skytrack console --host 0.0.0.0 --no-browser   # console in Docker
 ```
 
 ## Roadmap

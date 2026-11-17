@@ -8,6 +8,7 @@
     skytrack sim-vehicle                                   # MAVLink test vehicle on tcp:5760
     skytrack demo --mavlink tcp:127.0.0.1:5760 --gimbal-follow
     skytrack link-check --mavlink COM5 --gimbal-test         # hardware bring-up
+    skytrack console                                         # web operator console (simulation)
 """
 
 from __future__ import annotations
@@ -100,14 +101,15 @@ def _closed_loop_demo(args: argparse.Namespace) -> int:
     from .synthetic import PanningScene
 
     port = args.sim_port
-    sim = SimVehicle(connection=f"tcpin:127.0.0.1:{port}").start()
     args.mavlink = f"tcp:127.0.0.1:{port}"
     args.gimbal_follow = True
     if not args.config:
         cfg_path = Path(__file__).resolve().parents[2] / "configs" / "demo.yaml"
         args.config = str(cfg_path) if cfg_path.exists() else None
     cfg = load_config(args.config, _overrides(args))
-    scene = PanningScene(width=1280, height=720, hfov_deg=cfg.camera.hfov_deg, seed=args.seed)
+    scene = PanningScene(width=1280, height=720, hfov_deg=cfg.camera.hfov_deg, seed=args.seed, n_targets=3)
+    pitch_lim, yaw_lim = scene.gimbal_limits()
+    sim = SimVehicle(connection=f"tcpin:127.0.0.1:{port}", pitch_limits=pitch_lim, yaw_limits=yaw_lim).start()
     n = args.max_frames or 900
     frames = (scene.step(sim.gimbal_pitch, sim.gimbal_yaw)[0] for _ in range(n))
     try:
@@ -162,6 +164,71 @@ def cmd_sim_vehicle(args: argparse.Namespace) -> int:
     return 0
 
 
+def _free_port() -> int:
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def cmd_console(args: argparse.Namespace) -> int:
+    import itertools
+    import webbrowser
+
+    from .console import ConsoleServer, ConsoleSession
+    from .sources import _is_live, open_source
+
+    src = args.source
+    if not args.config and (src == "sim" or src.startswith("synthetic")):
+        demo = Path(__file__).resolve().parents[2] / "configs" / "demo.yaml"
+        args.config = str(demo) if demo.exists() else None
+    cfg = load_config(args.config, _overrides(args))
+    cfg.output.show = False
+    sim = None
+    if src == "sim":
+        from .simvehicle import SimVehicle
+        from .synthetic import PanningScene
+
+        port = _free_port()
+        scene = PanningScene(width=1280, height=720, hfov_deg=cfg.camera.hfov_deg, seed=args.seed, n_targets=3)
+        pitch_lim, yaw_lim = scene.gimbal_limits()
+        sim = SimVehicle(connection=f"tcpin:127.0.0.1:{port}", pitch_limits=pitch_lim, yaw_limits=yaw_lim).start()
+        cfg.mavlink.enabled, cfg.mavlink.connection = True, f"tcp:127.0.0.1:{port}"
+        cfg.mavlink.gimbal.follow = True
+        frames = (scene.step(sim.gimbal_pitch, sim.gimbal_yaw)[0] for _ in itertools.count())
+        fps, live, label = 30.0, False, "Simulation"
+    else:
+        frames, fps = open_source(src, args.max_frames or (10**9 if src.startswith("synthetic") else None))
+        live = _is_live(src)
+        label = "Synthetic" if src.startswith("synthetic") else ("Live" if live else Path(src).name)
+
+    session = ConsoleSession(cfg, frames, fps, live, label).start()
+    try:
+        server = ConsoleServer(session, args.host, args.port)
+    except OSError as exc:
+        session.stop()
+        if sim:
+            sim.stop()
+        print(f"error: cannot listen on {args.host}:{args.port} ({exc}); try --port {args.port + 1}")
+        return 1
+    print(f"SkyTrack console running at {server.url}  (Ctrl+C to stop)")
+    if args.host not in ("127.0.0.1", "localhost"):
+        print("warning: the console is reachable from the network; anyone who can open it can steer the gimbal")
+    if not args.no_browser:
+        webbrowser.open(server.url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.shutdown()
+        session.stop()
+        if sim:
+            sim.stop()
+    return 0
+
+
 def cmd_link_check(args: argparse.Namespace) -> int:
     from .linkcheck import run_link_check
 
@@ -201,6 +268,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--speed", type=float, default=10.0)
     p.add_argument("--duration", type=float, help="stop after N seconds (default: run until Ctrl+C)")
     p.set_defaults(func=cmd_sim_vehicle)
+
+    p = sub.add_parser("console", help="web operator console: live video, tactical plot, tracks, lock control")
+    p.add_argument("--source", "-s", default="sim",
+                   help="'sim' (default): closed-loop simulation with a MAVLink vehicle; 'synthetic', a video "
+                        "file, camera index or stream URL")
+    p.add_argument("--seed", type=int, default=7)
+    p.add_argument("--host", default="127.0.0.1", help="interface to serve on (default: this computer only)")
+    p.add_argument("--port", type=int, default=8080)
+    p.add_argument("--no-browser", action="store_true", help="do not open a browser window")
+    _common(p)
+    p.set_defaults(func=cmd_console)
 
     p = sub.add_parser("link-check", help="diagnose the flight-controller link before a flight")
     p.add_argument("--mavlink", default="udpin:0.0.0.0:14550", metavar="CONN")

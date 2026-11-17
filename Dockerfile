@@ -11,5 +11,8 @@ COPY configs ./configs
 ARG EXTRAS=""
 RUN pip install --no-cache-dir -e ".${EXTRAS}"
 
+# Web console: docker run -p 8080:8080 skytrack console --host 0.0.0.0 --no-browser
+EXPOSE 8080
+
 ENTRYPOINT ["skytrack"]
 CMD ["demo", "--no-show", "--save", "runs/demo.mp4", "--telemetry", "runs/demo.jsonl"]

@@ -87,12 +87,17 @@ class ClassicTargetDetector(Detector):
             if not 4 <= len(approx) <= 6:
                 continue
             x, y, w, h = cv2.boundingRect(approx)
-            if w < self.cfg.min_side or h < self.cfg.min_side:
-                continue
             if w > 0.9 * w_img or h > 0.9 * h_img:  # frame borders / horizon artefacts
                 continue
-            aspect = w / float(h)
-            if not self.cfg.aspect_min <= aspect <= self.cfg.aspect_max:
+            # Shape measured on the minimum-area rotated rectangle, so a square board is
+            # recognised at any rotation while elongated shapes (vehicles, roofs) are not,
+            # whatever their heading.
+            (_, _), (rw, rh), _ = cv2.minAreaRect(c)
+            short, long_ = min(rw, rh), max(rw, rh)
+            if short < self.cfg.min_side:
+                continue
+            aspect = long_ / max(short, 1e-6)
+            if aspect > max(self.cfg.aspect_max, 1.0 / self.cfg.aspect_min):
                 continue
             area = cv2.contourArea(c)
             hull_area = cv2.contourArea(cv2.convexHull(c))
@@ -101,11 +106,13 @@ class ClassicTargetDetector(Detector):
             solidity = area / hull_area
             if solidity < self.cfg.min_solidity:
                 continue
-            extent = area / float(w * h)
+            rectangularity = area / max(rw * rh, 1e-6)
+            if rectangularity < self.cfg.min_rectangularity:  # rejects discs, blobs, crosses
+                continue
             # Score: how close to an ideal filled square the contour is.
-            squareness = 1.0 - min(1.0, abs(1.0 - aspect) / 0.2)
+            squareness = 1.0 - min(1.0, (aspect - 1.0) / 0.25)
             vertex_bonus = 1.0 if len(approx) == 4 else 0.85
-            score = float(np.clip(0.45 * solidity + 0.35 * extent + 0.2 * squareness, 0, 1))
+            score = float(np.clip(0.4 * solidity + 0.4 * rectangularity + 0.2 * squareness, 0, 1))
             score *= vertex_bonus
             dets.append(Detection((float(x), float(y), float(x + w), float(y + h)), score, 0, "target"))
         return nms_contained(dets)

@@ -95,6 +95,7 @@ class VehicleState:
         return {
             "connected": self.connected(), "armed": self.armed, "mode": self.mode,
             "lat": r(self.lat, 7), "lon": r(self.lon, 7), "alt_rel": r(self.alt_rel, 2),
+            "alt_amsl": r(self.alt_amsl, 2),
             "heading": r(self.heading_deg, 1), "groundspeed": r(self.groundspeed, 2),
             "roll": r(math.degrees(self.roll), 2), "pitch": r(math.degrees(self.pitch), 2),
             "yaw": r(math.degrees(self.yaw), 2),

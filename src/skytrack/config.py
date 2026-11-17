@@ -25,6 +25,7 @@ class DetectorConfig:
     aspect_min: float = 0.8
     aspect_max: float = 1.2
     min_solidity: float = 0.9
+    min_rectangularity: float = 0.8  # contour area / min-area rotated rectangle
     clahe: bool = True
 
 

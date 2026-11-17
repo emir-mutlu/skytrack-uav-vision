@@ -302,7 +302,10 @@ def draw_hud(
     target_geo: GeoPoint | None = None,
     gimbal_follow: bool = False,
     link_timeout: float = 3.0,
+    panels: bool = True,
 ) -> np.ndarray:
+    """Draw the operator HUD. With `panels=False` only the scene overlay is drawn (boxes,
+    reticle, lock zone, trails); the web console renders the instrument panels itself."""
     cv = _Canvas(frame)
     img, h, w, px = frame, cv.h, cv.w, cv.px
     cx, cy = w // 2, h // 2
@@ -320,10 +323,11 @@ def draw_hud(
     help_txt = "CLICK / TAB  designate     R  release     SPACE  pause     Q  quit"
     hw = cv.text_width(help_txt, 11) + px(28)
     hb = (cx - hw // 2, h - pad - px(26), cx + hw // 2, h - pad)
-    for rect in (tl, tr, er, bl, hb):
-        cv.panel(rect)
+    if panels:
+        for rect in (tl, tr, er, bl, hb):
+            cv.panel(rect)
     vrows: list[tuple[str, str, tuple[int, int, int]]] = []
-    if vehicle is not None:
+    if vehicle is not None and panels:
         vrows = _vehicle_rows(vehicle, target_geo, gimbal_follow, link_timeout)
         row_h = px(19)
         vp = (pad, tl[3] + px(8), pad + px(232), tl[3] + px(8) + px(12) + row_h * len(vrows))
@@ -346,7 +350,7 @@ def draw_hud(
         x1, y1, _, y2 = map(int, t.bbox)
         tw = cv.text_width(label, 12, "mono") + px(14)
         ty = y1 - px(8) - tag_h
-        if ty < tl[3] + px(4):  # no room above: put the tag under the box
+        if ty < (tl[3] if panels else 0) + px(4):  # no room above: put the tag under the box
             ty = y2 + px(8)
         tx = int(np.clip(x1, 0, w - tw))
         rect = (tx, ty, tx + tw, ty + tag_h)
@@ -403,6 +407,12 @@ def draw_hud(
 
     if target_center is not None:
         _dashed(img, (cx, cy), target_center, state_col, 1, px(8), px(6))
+
+    if not panels:
+        for _, rect, label, color in tags:
+            cv.text((rect[0] + px(7), (rect[1] + rect[3]) / 2), label, color, 12, "mono", "lm")
+        cv.flush_text()
+        return img
 
     # boresight-error indicator (bottom right)
     ix1, iy1 = er[0] + px(10), er[1] + px(24)
