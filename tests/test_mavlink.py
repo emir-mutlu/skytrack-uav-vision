@@ -140,9 +140,19 @@ def test_closed_loop_gimbal_follow_keeps_target_centred(tmp_path):
         "mavlink": {"enabled": True, "connection": "tcp:127.0.0.1:5782", "gimbal": {"follow": True}}})
     pipe = Pipeline(cfg)
     scene = PanningScene(width=960, height=540, hfov_deg=cfg.camera.hfov_deg, seed=7)
+
+    def camera(n: int = 150, fps: float = 30.0):
+        """Frames at a real camera's pace, so the loop behaves the same on fast and slow machines."""
+        pipe.link.wait_connected(10)  # run() has started the link before asking for the first frame
+        t0 = time.perf_counter()
+        for i in range(n):
+            delay = t0 + i / fps - time.perf_counter()
+            if delay > 0:
+                time.sleep(delay)
+            yield scene.step(sim.gimbal_pitch, sim.gimbal_yaw)[0]
+
     try:
-        summary = pipe.run((scene.step(sim.gimbal_pitch, sim.gimbal_yaw)[0] for _ in range(150)),
-                           30.0, live=True)
+        summary = pipe.run(camera(), 30.0, live=True)
     finally:
         sim.stop()
     assert summary["locks_acquired"] >= 1 and sim.gimbal_commands > 20

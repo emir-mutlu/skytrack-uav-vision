@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 import cv2
@@ -111,7 +112,16 @@ def _closed_loop_demo(args: argparse.Namespace) -> int:
     pitch_lim, yaw_lim = scene.gimbal_limits()
     sim = SimVehicle(connection=f"tcpin:127.0.0.1:{port}", pitch_limits=pitch_lim, yaw_limits=yaw_lim).start()
     n = args.max_frames or 900
-    frames = (scene.step(sim.gimbal_pitch, sim.gimbal_yaw)[0] for _ in range(n))
+
+    def camera():  # real-time pacing: the simulated vehicle and gimbal run on the wall clock
+        t0 = time.perf_counter()
+        for i in range(n):
+            delay = t0 + i / 30.0 - time.perf_counter()
+            if delay > 0:
+                time.sleep(delay)
+            yield scene.step(sim.gimbal_pitch, sim.gimbal_yaw)[0]
+
+    frames = camera()
     try:
         summary = Pipeline(cfg).run(frames, 30.0, live=True)
     finally:
@@ -144,8 +154,6 @@ def cmd_synth(args: argparse.Namespace) -> int:
 
 
 def cmd_sim_vehicle(args: argparse.Namespace) -> int:
-    import time
-
     from .simvehicle import SimVehicle
 
     sim = SimVehicle(connection=args.connection, altitude=args.altitude, radius=args.radius,
