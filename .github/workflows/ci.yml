@@ -51,7 +51,18 @@ jobs:
           chmod +x sitl/arducopter
           echo "firmware: $(curl -fsSL "$base/firmware-version.txt")"
           curl -fsSL "$base/git-version.txt" | head -3
-      - name: SITL tests (telemetry, gimbal rate control, link-check)
+      - name: SITL tests (telemetry, gimbal rate control, link-check, console)
         env:
           SKYTRACK_SITL_BIN: ${{ github.workspace }}/sitl/arducopter
-        run: pytest -q -s tests/test_sitl.py
+        run: pytest -q -s -rA tests/test_sitl.py --junitxml=sitl-junit.xml
+      - name: Report SITL results
+        if: always()
+        run: |
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("sitl-junit.xml").getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          cases = list(suite.iter("testcase"))
+          ok = [c.get("name") for c in cases if not any(c.find(t) is not None for t in ("skipped", "failure", "error"))]
+          print(f"::notice title=ArduPilot SITL::{len(ok)}/{len(cases)} passed: {', '.join(ok)}")
+          PY
