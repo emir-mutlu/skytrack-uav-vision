@@ -108,28 +108,33 @@ def _terrain(w: int, h: int, rng: np.random.Generator) -> tuple[np.ndarray, list
     soil = _smoothstep(0.76, 0.81, soil_n) * (1 - forest) * (1 - water) * 0.8
 
     img = np.empty((h, w, 3), np.float32)
-    lo, hi = np.array(_rgb(98, 132, 68), np.float32), np.array(_rgb(126, 152, 82), np.float32)
+    lo, hi = np.array(_rgb(92, 112, 66), np.float32), np.array(_rgb(122, 134, 84), np.float32)
     img[:] = lo + (hi - lo) * cover[..., None]
-    for mask, rgb in ((dry, (158, 152, 100)), (soil, (134, 112, 86)), (water, (52, 78, 76)),
-                      (forest, (44, 70, 40))):
+    for mask, rgb in ((dry, (148, 140, 104)), (soil, (128, 110, 90)), (water, (56, 72, 74)),
+                      (forest, (44, 58, 38))):
         img += (np.array(_rgb(*rgb), np.float32) - img) * mask[..., None]
-    img *= (0.9 + 0.2 * grain)[..., None]
-    img = np.clip(img, 0, 255).astype(np.uint8)
+    img *= (0.88 + 0.24 * grain)[..., None]
 
-    # tree crowns: dense in forest, sparse over meadows; shadow, crown, sunlit highlight
-    n = int(w * h / 260)
+    # tree crowns: dense in forest, sparse over meadows. Drawn as soft, leaf-textured blobs
+    # with an offset cast shadow and a sunlit upper-left rim, not as flat discs.
+    n = int(w * h / 230)
     xs, ys = rng.uniform(0, w, n), rng.uniform(0, h, n)
-    f = forest[ys.astype(int).clip(0, h - 1), xs.astype(int).clip(0, w - 1)]
-    keep = (rng.random(n) < f * 0.9) | (rng.random(n) < 0.004)
-    keep &= water[ys.astype(int).clip(0, h - 1), xs.astype(int).clip(0, w - 1)] < 0.2
-    for x, y in zip(xs[keep], ys[keep], strict=True):
-        r = rng.uniform(3.5, 7.0)
-        g = int(rng.integers(64, 98))
-        shadow = (int((x + 2.2) * ONE), int((y + 2.8) * ONE))
-        cv2.circle(img, shadow, int(r * ONE), _rgb(26, 40, 24), -1, AA, SHIFT)
-        cv2.circle(img, (int(x * ONE), int(y * ONE)), int(r * ONE), _rgb(g - 30, g, g - 40), -1, AA, SHIFT)
-        cv2.circle(img, (int((x - r * 0.3) * ONE), int((y - r * 0.3) * ONE)), int(r * 0.5 * ONE),
-                   _rgb(g - 14, g + 18, g - 26), -1, AA, SHIFT)
+    iy, ix = ys.astype(int).clip(0, h - 1), xs.astype(int).clip(0, w - 1)
+    keep = ((rng.random(n) < forest[iy, ix] * 0.95) | (rng.random(n) < 0.004)) & (water[iy, ix] < 0.2)
+    crowns = np.zeros((h, w), np.uint8)
+    shadows = np.zeros((h, w), np.uint8)
+    for x, y, r in zip(xs[keep], ys[keep], rng.uniform(3.0, 6.5, int(keep.sum())), strict=True):
+        cv2.circle(shadows, (int((x + 2.4) * ONE), int((y + 3.0) * ONE)), int(r * ONE), 255, -1, AA, SHIFT)
+        cv2.circle(crowns, (int(x * ONE), int(y * ONE)), int(r * ONE), 255, -1, AA, SHIFT)
+    shade = cv2.GaussianBlur(shadows, (0, 0), 1.6).astype(np.float32) / 255.0
+    crown = cv2.GaussianBlur(crowns, (0, 0), 0.9).astype(np.float32) / 255.0
+    leaves = _fbm(h, w, rng, 5, octaves=2)
+    img *= (1.0 - 0.5 * shade)[..., None]
+    crown_col = np.array(_rgb(50, 66, 42), np.float32) * (0.72 + 0.6 * leaves)[..., None]
+    img += (crown_col - img) * crown[..., None]
+    rim = np.clip(crown - np.roll(crown, (2, 2), axis=(0, 1)), 0.0, 1.0)
+    img += (rim * 26.0)[..., None]
+    img = np.clip(img, 0, 255).astype(np.uint8)
 
     # a dirt track, then two asphalt roads with gravel shoulders and dashed centre lines
     track = _bezier((-40, rng.uniform(0.1, 0.9) * h), (rng.uniform(0, w), rng.uniform(0, h)),
@@ -163,7 +168,12 @@ def _terrain(w: int, h: int, rng: np.random.Generator) -> tuple[np.ndarray, list
         _fill(img, body, _rgb(*roof))
         half = _rect(c[0], c[1] + 0, length, width / 2, ang)
         _fill(img, half + normal * width / 4, _rgb(*(int(v * 0.8) for v in roof)))  # shaded roof half
-    return img, roads
+    # EO camera look: muted colour and a little atmospheric haze at altitude
+    f = img.astype(np.float32)
+    gray = f.mean(axis=2, keepdims=True)
+    f = gray + (f - gray) * 0.7
+    f = f * 0.92 + np.array(_rgb(176, 182, 188), np.float32) * 0.08
+    return np.clip(f, 0, 255).astype(np.uint8), roads
 
 
 # ----------------------------------------------------------------------------- objects
@@ -189,8 +199,8 @@ def _board_corners(m: _Mover, dx: float = 0.0, dy: float = 0.0, scale: float = 1
 
 def _draw_board(img: np.ndarray, m: _Mover, dx: float, dy: float) -> None:
     _shade(img, _board_corners(m, dx, dy) + SUN, 0.42)
-    for scale, rgb in ((1.0, (236, 236, 230)), (0.84, (28, 28, 30)), (0.56, (236, 236, 230)),
-                       (0.30, (206, 38, 42))):
+    for scale, rgb in ((1.0, (214, 214, 206)), (0.84, (40, 40, 42)), (0.56, (214, 214, 206)),
+                       (0.30, (164, 52, 46))):
         _fill(img, _board_corners(m, dx, dy, scale), _rgb(*rgb))
 
 

@@ -7,7 +7,7 @@
 Real-time perception pipeline for UAV video: **detect → track → lock**, with an operator HUD,
 structured telemetry and a reproducible benchmark. Talks **MAVLink** to ArduPilot / PX4 flight
 controllers to geolocate targets and keep the locked target centred with the camera gimbal.
-An operator works it from a browser-based ground-control console. Runs on a laptop CPU, scales
+An operator works it from a browser-based ground-control station. Runs on a laptop CPU, scales
 to a GPU or an edge device (Jetson / ONNX / TensorRT) by swapping the detector.
 
 <p align="center">
@@ -36,10 +36,10 @@ to a GPU or an edge device (Jetson / ONNX / TensorRT) by swapping the detector.
   telemetry, gimbal rate control, the link diagnostics and the operator console end to end
 - **Hardware bring-up tool** — `skytrack link-check` verifies heartbeat, stream rates, GPS,
   gimbal reporting and gimbal motion with PASS / WARN / FAIL hints before the first flight
-- **Web operator console** — a browser ground-control station: live annotated video with
-  click-to-designate, tactical plot (vehicle, camera footprint, geolocated targets), lock status,
-  track table, trend charts, event log and a day / night display; standard library only
-  (MJPEG + Server-Sent Events + a JSON command API)
+- **Ground-control console** — a browser GCS in the layout of desktop ground-control software:
+  status toolbar (mode, arming, GPS, battery, link), payload video with click-to-designate and a
+  picture-in-picture map, attitude and heading instruments, telemetry, target data, track grid and
+  message log; standard library only (MJPEG + Server-Sent Events + a JSON command API)
 - **Hardware-free testing** — built-in MAVLink vehicle simulator and a pan/tilt synthetic camera
   that closes the loop detector → lock → gimbal command → camera motion
 - **Operator HUD** — translucent panels with crisp TrueType text, lock-zone brackets, boresight
@@ -123,7 +123,7 @@ skytrack run -s 0 --detector yolo --model yolo11n.pt   # webcam
 
 ## Operator console
 
-![SkyTrack Ground Control console](assets/console.png)
+![SkyTrack GCS console](assets/console.png)
 
 `skytrack console` starts the pipeline and opens a ground-control console in the browser. With the
 default `sim` source it flies the simulated MAVLink vehicle, so every panel is live without
@@ -134,14 +134,15 @@ skytrack console                                                    # simulation
 skytrack console -s rtsp://192.168.1.10:8554/cam -c configs/recon.yaml --mavlink udpin:0.0.0.0:14550
 ```
 
-| Panel | What it shows |
+| Area | What it shows |
 |---|---|
-| Camera | Annotated live feed; click a target to designate it. Release (`R`), pause (`Space`), gimbal follow (`F`), auto designation (`A`) |
-| Target lock | Lock state, target, lock time and the boresight error on a scope whose ring fills during acquisition |
-| Tactical plot | North-up plot around the vehicle: range rings, camera footprint on the ground, geolocated targets, line of sight, vehicle track |
-| Vehicle | Mode, arming, altitude, speed, heading, gimbal attitude and rate command, target position with a map link |
-| Tracks | Every confirmed track with confidence, age and range; click a row to designate |
-| Trends / Events | Boresight error and detector latency over the last 30 s; lock, designation and link events |
+| Toolbar | Flight mode, arming state, GPS fix and satellites, battery voltage and charge, link status, processing rate, UTC |
+| Video | Payload video with tracker symbology; click a target to designate it. A picture-in-picture map (north up, metric grid, sensor footprint, track symbols, vehicle track) swaps with the video (`M`) |
+| Payload bar | Tracker mode (SEARCH / ACQUIRE / TRACK / COAST), break lock (`R`), freeze (`Space`), gimbal Follow / Hold (`F`), acquisition Auto / Manual (`A`) |
+| Instruments | Attitude indicator; heading indicator with the sensor field of view and the bearing to the target |
+| Telemetry | Altitude AGL / MSL, ground speed, heading, sensor azimuth and elevation, position |
+| Target | Track, tracker status, boresight error, latitude / longitude, ground and slant range, bearing, tracking-error strip chart |
+| Tracks / Messages | Every confirmed track with confidence, age, range and bearing (click to designate); lock, designation and link messages with severity |
 
 The console is a single page served by the Python standard library: video over MJPEG, state over
 Server-Sent Events at 10 Hz, commands as JSON (`POST /api/command`), and `/api/state`,
@@ -156,13 +157,15 @@ move the gimbal; `--host 0.0.0.0` exposes it to the network and prints a warning
 
 ![HUD](assets/hud.png)
 
+Monochrome symbology in the style of EO/IR gimbal payload video:
+
 | Element | Meaning |
 |---|---|
-| Status pill (top left) | Lock state — `SEARCHING` · `ACQUIRING` · `LOCKED` · `LOST` — with target ID and lock time |
-| Telemetry (top right) | Processing FPS, detector latency, active tracks, detector backend |
-| Corner brackets | Tracks: teal = tracked, cyan = lock candidate, amber/red = designated target |
-| Amber ring / red box | Acquisition progress / confirmed lock |
-| Dashed line + error box | Target offset from the boresight, the signal a gimbal controller would centre |
+| Centre reticle | Boresight; the gimbal-follow loop keeps the designated target on it |
+| Track gate | Corner brackets on the designated target; `ACQ nn%` while acquiring, a `LOCK` tag once the lock is declared, dashed `LOST` while coasting. Other tracks get small grey brackets and their ID (`?` marks the lock candidate) |
+| Top tape / right scale | Sensor azimuth (vehicle heading + gimbal yaw) and gimbal elevation, from MAVLink |
+| Corner blocks | Sensor and profile, flight mode and arming, altitude and speed (top left); UTC, frame and processing rate (top right); aircraft position and gimbal angles (bottom left); target ID, lock time, position, slant and ground range (bottom right) |
+| Bottom line | Tracker mode `SEARCH` / `ACQUIRE` / `TRACK` / `COAST`, `AUTO` or `MAN` acquisition, `FREEZE` when paused |
 
 ## Flight-controller integration (MAVLink)
 
@@ -280,10 +283,10 @@ sensor noise, and a cloud that drifts through the view every 12 s to hide target
 
 | Metric | Value |
 |---|---|
-| Detection precision / recall / F1 | 0.981 / 0.968 / **0.974** |
-| Tracking MOTA | **0.935** |
-| ID switches | 0 |
-| Latency (mean / p95) | **10.4 ms / 12.8 ms** per 960×540 frame |
+| Detection precision / recall / F1 | 0.979 / 0.968 / **0.974** |
+| Tracking MOTA | **0.933** |
+| ID switches | 1 |
+| Latency (mean / p95) | **5.6 ms / 6.6 ms** per 960×540 frame |
 
 Reproduce with `skytrack eval --config configs/demo.yaml --frames 600`. The misses come from the
 cloud passes; the cloud-free first 300 frames score F1 1.00. The shape test runs on the

@@ -62,7 +62,7 @@ def _wait(pred, timeout=5.0):
 def test_static_ui_is_served(console):
     port, _ = console
     status, ctype, body, _ = _get(port, "/")
-    assert status == 200 and ctype.startswith("text/html") and b"SkyTrack Ground Control" in body
+    assert status == 200 and ctype.startswith("text/html") and b"SkyTrack GCS" in body
     for path, kind in (("/app.js", "javascript"), ("/app.css", "text/css")):
         status, ctype, body, _ = _get(port, path)
         assert status == 200 and kind in ctype and len(body) > 1000

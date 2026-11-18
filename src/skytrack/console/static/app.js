@@ -1,14 +1,16 @@
-/* SkyTrack Ground Control - live operator console.
+/* SkyTrack GCS - operator console.
  * State arrives over Server-Sent Events (or polling with ?poll), video as MJPEG
  * (or polled snapshots). Commands go to POST /api/command as JSON. */
 "use strict";
 (() => {
   const $ = (id) => document.getElementById(id);
   const root = document.documentElement;
-  const POLL = new URLSearchParams(location.search).has("poll");
+  const params = new URLSearchParams(location.search);
+  const POLL = params.has("poll");
   const WINDOW_S = 30;
   const M_PER_DEG = 111320;
-  const S = { last: null, err: [], lat: [], trail: [], hover: {}, online: false, seq: -1, html: {} };
+  const D2R = Math.PI / 180;
+  const S = { last: null, err: [], trail: [], online: false, seq: -1, html: {}, swapped: false, hover: null };
   let dirty = true;
   let toastTimer = 0;
 
@@ -16,26 +18,37 @@
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const esc = (v) => String(v).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const fmt = (v, d = 1) => (v == null || Number.isNaN(v) ? "—" : Number(v).toFixed(d));
-  const signed = (v, d = 2) => (v == null ? "—" : (v < 0 ? "−" : "+") + Math.abs(v).toFixed(d));
+  const sgn = (v, d = 1) => (v == null ? "—" : (v < 0 ? "-" : "+") + Math.abs(v).toFixed(d));
+  const deg3 = (v) => String(Math.round(((v % 360) + 360) % 360) % 360).padStart(3, "0");
   const setText = (id, text) => { const el = $(id); if (el.textContent !== text) el.textContent = text; };
   const setHTML = (id, html) => { if (S.html[id] !== html) { S.html[id] = html; $(id).innerHTML = html; } };
+  const setLed = (id, s) => { const el = $(id); if (el.dataset.s !== s) el.dataset.s = s; };
+
+  function dms(value, pos, neg, width) {
+    const v = Math.abs(value), d = Math.floor(v), m = Math.floor((v - d) * 60);
+    const s = (v - d - m / 60) * 3600;
+    return `${String(d).padStart(width, "0")}°${String(m).padStart(2, "0")}'${s.toFixed(2).padStart(5, "0")}"${value >= 0 ? pos : neg}`;
+  }
+  const latDms = (v) => dms(v, "N", "S", 2);
+  const lonDms = (v) => dms(v, "E", "W", 3);
+  function bearingRange(lat0, lon0, lat, lon) {
+    const n = (lat - lat0) * M_PER_DEG, e = (lon - lon0) * M_PER_DEG * Math.cos(lat0 * D2R);
+    return [((Math.atan2(e, n) / D2R) + 360) % 360, Math.hypot(n, e)];
+  }
 
   /* ------------------------------------------------------------------ theme */
   function setTheme(t) {
     root.dataset.theme = t;
-    const b = $("theme-toggle");
-    b.textContent = t === "day" ? "Night" : "Day";
-    b.setAttribute("aria-label", t === "day" ? "Switch to night display" : "Switch to day display");
+    $("theme-toggle").textContent = t === "day" ? "Night" : "Day";
     try { localStorage.setItem("skytrack-theme", t); } catch (_) { /* storage unavailable */ }
     dirty = true;
   }
   let saved = null;
   try { saved = localStorage.getItem("skytrack-theme"); } catch (_) { /* storage unavailable */ }
-  const forced = new URLSearchParams(location.search).get("theme"); // ?theme=day for screenshots / kiosks
-  setTheme((forced || saved) === "day" ? "day" : "night");
+  setTheme((params.get("theme") || saved) === "day" ? "day" : "night");
   $("theme-toggle").addEventListener("click", () => setTheme(root.dataset.theme === "day" ? "night" : "day"));
 
-  /* ------------------------------------------------------------------ toast + commands */
+  /* ------------------------------------------------------------------ commands */
   function toast(msg, sticky = false) {
     const t = $("toast");
     t.textContent = msg;
@@ -43,94 +56,95 @@
     clearTimeout(toastTimer);
     if (!sticky) toastTimer = setTimeout(() => { t.hidden = true; }, 3500);
   }
-
   async function send(cmd) {
     try {
-      const r = await fetch("/api/command", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(cmd),
-      });
+      const r = await fetch("/api/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(cmd) });
       const j = await r.json().catch(() => ({}));
-      if (!r.ok || !j.ok) toast(j.error || `Command failed (HTTP ${r.status})`);
+      if (!r.ok || !j.ok) toast(j.error || `Command rejected (HTTP ${r.status})`);
     } catch (_) {
       toast("SkyTrack is not reachable. Check that `skytrack console` is still running.");
     }
   }
 
-  /* ------------------------------------------------------------------ video */
-  const video = $("video");
+  /* ------------------------------------------------------------------ video / map views */
+  const video = $("video"), map = $("map");
   function startVideo() { if (!POLL) video.src = "/stream.mjpg?ts=" + Date.now(); }
   video.addEventListener("load", () => { $("video-offline").hidden = true; });
-  video.addEventListener("error", () => {
-    $("video-offline").hidden = false;
-    if (!POLL) setTimeout(startVideo, 1500);
-  });
-  $("video-wrap").addEventListener("click", (e) => {
+  video.addEventListener("error", () => { $("video-offline").hidden = false; if (!POLL) setTimeout(startVideo, 1500); });
+
+  function layoutViews() {
+    const main = $("main-slot"), pip = $("pip-slot");
+    main.appendChild(S.swapped ? map : video);
+    pip.appendChild(S.swapped ? video : map);
+    main.classList.toggle("is-video", !S.swapped);
+    setText("pip-name", S.swapped ? "Video" : "Map");
+    $("video-offline").style.display = S.swapped ? "none" : "";
+    dirty = true;
+  }
+  $("pip-swap").addEventListener("click", (e) => { e.stopPropagation(); S.swapped = !S.swapped; layoutViews(); });
+  layoutViews();
+
+  $("main-slot").addEventListener("click", (e) => {
     const s = S.last;
-    if (!s) return;
+    if (!s || S.swapped) return;
     const r = video.getBoundingClientRect();
     const [iw, ih] = s.size;
-    const k = Math.min(r.width / iw, r.height / ih);
-    const dw = iw * k, dh = ih * k;
-    const x = (e.clientX - r.left - (r.width - dw) / 2) / dw;
-    const y = (e.clientY - r.top - (r.height - dh) / 2) / dh;
+    const k = Math.min(r.width / iw, r.height / ih), dw = iw * k, dh = ih * k;
+    const x = (e.clientX - r.left - (r.width - dw) / 2) / dw, y = (e.clientY - r.top - (r.height - dh) / 2) / dh;
     if (x >= 0 && x <= 1 && y >= 0 && y <= 1) send({ cmd: "designate", x, y });
   });
 
   /* ------------------------------------------------------------------ controls */
   $("btn-release").addEventListener("click", () => send({ cmd: "release" }));
   $("btn-pause").addEventListener("click", () => send({ cmd: "toggle_pause" }));
-  $("tg-follow").addEventListener("click", () => send({ cmd: "follow", on: !(S.last && S.last.gimbal.follow) }));
-  $("tg-auto").addEventListener("click", () => send({ cmd: "auto_designation", on: !(S.last && S.last.lock.auto) }));
+  $("seg-gimbal").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-v]");
+    if (b) send({ cmd: "follow", on: b.dataset.v === "follow" });
+  });
+  $("seg-acq").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-v]");
+    if (b) send({ cmd: "auto_designation", on: b.dataset.v === "auto" });
+  });
   $("tracks-body").addEventListener("click", (e) => {
     const row = e.target.closest("tr[data-id]");
     if (row) send({ cmd: "designate_id", id: Number(row.dataset.id) });
   });
-  $("tracks-body").addEventListener("keydown", (e) => {
-    const row = e.target.closest("tr[data-id]");
-    if (row && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); send({ cmd: "designate_id", id: Number(row.dataset.id) }); }
-  });
   addEventListener("keydown", (e) => {
-    if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest("input, textarea, select, tr")) return;
-    if (e.target.closest("button") && (e.code === "Space" || e.key === "Enter")) return; // native click
-    const k = e.key.toLowerCase();
+    if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest("input, textarea, select")) return;
+    if (e.target.closest("button") && (e.code === "Space" || e.key === "Enter")) return;
+    const k = e.key.toLowerCase(), s = S.last;
     if (k === "r") send({ cmd: "release" });
     else if (e.code === "Space") { e.preventDefault(); send({ cmd: "toggle_pause" }); }
-    else if (k === "f" && S.last && S.last.gimbal.available) send({ cmd: "follow", on: !S.last.gimbal.follow });
-    else if (k === "a" && S.last) send({ cmd: "auto_designation", on: !S.last.lock.auto });
+    else if (k === "f" && s && s.gimbal.available) send({ cmd: "follow", on: !s.gimbal.follow });
+    else if (k === "a" && s) send({ cmd: "auto_designation", on: !s.lock.auto });
+    else if (k === "m") { S.swapped = !S.swapped; layoutViews(); }
   });
-  for (const id of ["sp-err", "sp-lat"]) {
-    const cv = $(id);
-    cv.addEventListener("mousemove", (e) => { S.hover[id] = e.offsetX; dirty = true; });
-    cv.addEventListener("mouseleave", () => { S.hover[id] = null; dirty = true; });
-  }
+  const strip = $("sp-err");
+  strip.addEventListener("mousemove", (e) => { S.hover = e.offsetX; dirty = true; });
+  strip.addEventListener("mouseleave", () => { S.hover = null; dirty = true; });
   addEventListener("resize", () => { dirty = true; });
 
   /* ------------------------------------------------------------------ data */
   function setOnline(on) {
     if (on === S.online) return;
     S.online = on;
-    if (on) { $("toast").hidden = true; startVideo(); }
-    else toast("Connection to SkyTrack lost. Reconnecting…", true);
+    if (on) { $("toast").hidden = true; startVideo(); } else toast("Connection to SkyTrack lost. Reconnecting…", true);
   }
-
   async function loadHistory() {
     try {
       const h = await (await fetch("/api/history", { cache: "no-store" })).json();
       const now = performance.now() / 1000;
       S.err = h.err.filter((r) => r[0] <= WINDOW_S).map(([age, v]) => [now - age, v]);
-      S.lat = h.lat.filter((r) => r[0] <= WINDOW_S).map(([age, v]) => [now - age, v]);
       S.trail = h.trail.map(([age, la, lo]) => [now - age, la, lo]);
       dirty = true;
-    } catch (_) { /* charts simply start empty */ }
+    } catch (_) { /* start with empty charts */ }
   }
-
   async function connect() {
     await loadHistory();
     if (POLL) {
       const tick = async () => {
         try {
-          const r = await fetch("/api/state", { cache: "no-store" });
-          const s = await r.json();
+          const s = await (await fetch("/api/state", { cache: "no-store" })).json();
           setOnline(true);
           ingest(s);
           if (s.seq != null && s.seq !== S.seq) { S.seq = s.seq; video.src = "/api/snapshot.jpg?seq=" + s.seq; }
@@ -141,156 +155,151 @@
       return;
     }
     const es = new EventSource("/events");
-    es.onmessage = (m) => { setOnline(true); try { ingest(JSON.parse(m.data)); } catch (_) { /* partial frame */ } };
+    es.onmessage = (m) => { setOnline(true); try { ingest(JSON.parse(m.data)); } catch (_) { /* partial */ } };
     es.onerror = () => setOnline(false);
   }
-
-  function push(arr, t, v) {
-    arr.push([t, v]);
-    while (arr.length && t - arr[0][0] > WINDOW_S) arr.shift();
-  }
-
   function ingest(s) {
-    if (!s || !s.lock) return; // no frame processed yet
+    if (!s || !s.lock) return;
     S.last = s;
     const now = performance.now() / 1000;
     const e = s.lock.error;
-    push(S.err, now, e ? Math.hypot(e[0], e[1]) : null);
-    push(S.lat, now, s.latency_ms);
+    S.err.push([now, e ? Math.hypot(e[0], e[1]) : null]);
+    while (S.err.length && now - S.err[0][0] > WINDOW_S) S.err.shift();
     const v = s.vehicle;
     if (v && v.connected && v.lat != null) {
       const last = S.trail[S.trail.length - 1];
       if (!last || now - last[0] > 0.5) S.trail.push([now, v.lat, v.lon]);
-      while (S.trail.length && now - S.trail[0][0] > 120) S.trail.shift();
+      while (S.trail.length && now - S.trail[0][0] > 180) S.trail.shift();
     }
-    renderTop(s);
-    renderVideo(s);
-    renderLock(s);
-    renderVehicle(s);
+    renderToolbar(s);
+    renderPayload(s);
+    renderTelemetry(s);
+    renderTarget(s);
     renderTracks(s);
-    renderEvents(s);
+    renderLog(s);
     dirty = true;
   }
 
-  /* ------------------------------------------------------------------ panels */
-  function renderTop(s) {
-    setText("chip-source", s.source || "Source");
-    setText("chip-profile", "Profile " + s.profile);
-    const chip = $("chip-link"), v = s.vehicle;
-    let status = "off", text = "No vehicle link";
-    if (v && v.connected) { status = "ok"; text = `${v.mode || "?"} · ${v.armed ? "Armed" : "Disarmed"}`; }
-    else if (s.gimbal.available) { status = "warn"; text = "No heartbeat"; }
-    chip.dataset.status = status;
-    setText("chip-link-text", text);
-    setText("m-fps", fmt(s.fps, 1));
-    setText("m-lat", fmt(s.latency_ms, 1) + " ms");
+  /* ------------------------------------------------------------------ panes */
+  const GPS_FIX = { 0: "No GPS", 1: "No fix", 2: "2D", 3: "3D", 4: "DGPS", 5: "RTK float", 6: "RTK fixed" };
+  function renderToolbar(s) {
+    const v = s.vehicle, up = v && v.connected;
+    setText("v-mode", up ? v.mode || "—" : "—");
+    const arm = $("v-arm");
+    setText("v-arm", up ? (v.armed ? "ARMED" : "Disarmed") : "—");
+    arm.dataset.armed = String(!!(up && v.armed));
+    if (up && v.gps_fix != null) {
+      setText("v-gps", `${GPS_FIX[v.gps_fix] || v.gps_fix}${v.gps_sats != null ? " · " + v.gps_sats + " sat" : ""}`);
+      setLed("led-gps", v.gps_fix >= 3 ? "ok" : v.gps_fix === 2 ? "warn" : "crit");
+    } else { setText("v-gps", "—"); setLed("led-gps", ""); }
+    if (up && v.battery_v != null) {
+      setText("v-bat", `${fmt(v.battery_v, 1)} V${v.battery_pct != null ? " · " + v.battery_pct + "%" : ""}`);
+      const p = v.battery_pct;
+      setLed("led-bat", p == null ? "ok" : p > 30 ? "ok" : p > 15 ? "warn" : "crit");
+    } else { setText("v-bat", "—"); setLed("led-bat", ""); }
+    if (up) { setText("v-link", "OK"); setLed("led-link", "ok"); }
+    else if (s.gimbal.available) { setText("v-link", "No heartbeat"); setLed("led-link", "crit"); }
+    else { setText("v-link", "None"); setLed("led-link", ""); }
+    setText("v-src", s.source || "—");
+    setText("v-proc", `${fmt(s.fps, 1)} fps · ${fmt(s.latency_ms, 1)} ms`);
+    setText("video-meta", `EO · ${s.detector} · ${s.size[0]}x${s.size[1]} · F${String(s.frame).padStart(6, "0")}`);
   }
 
-  function lockSummary(L, nTracks) {
-    if (!L.enabled) return `${nTracks} active tracks`;
-    if (L.state === "LOCKED") return `Target #${L.track_id} · ${fmt(L.duration, 1)} s`;
-    if (L.state === "ACQUIRING") return `Target #${L.track_id} · ${Math.round(L.progress * 100)} %`;
-    if (L.state === "LOST") return `Target #${L.track_id} · reacquiring`;
-    return L.candidate_id != null ? `Candidate #${L.candidate_id}` : "No target";
-  }
-
-  function renderVideo(s) {
-    const L = s.lock, pill = $("state-pill");
-    pill.dataset.state = L.enabled ? L.state : "OFF";
-    setText("state-pill", L.enabled ? L.state.toLowerCase() : "Track only");
-    setText("state-sub", lockSummary(L, s.tracks.length));
-    $("video-paused").hidden = !s.paused;
-    $("video-hint").hidden = !(L.enabled && !L.auto && s.tracks.length && L.designated_id == null);
-    setText("frame-meta", `F${String(s.frame).padStart(6, "0")} · ${s.detector.toUpperCase()} · ${s.size[0]}×${s.size[1]}`);
+  const MODE = { SEARCHING: ["SEARCH", ""], ACQUIRING: ["ACQUIRE", "warn"], LOCKED: ["TRACK", "ok"], LOST: ["COAST", "warn"] };
+  function renderPayload(s) {
+    const L = s.lock;
+    const [label, led] = L.enabled ? MODE[L.state] : ["OFF", ""];
+    setText("trk-state", label + (s.paused ? " · FROZEN" : ""));
+    setLed("led-trk", led);
     const pause = $("btn-pause");
     pause.setAttribute("aria-pressed", String(s.paused));
-    pause.querySelector(".lbl").textContent = s.paused ? "Resume" : "Pause";
-    const follow = $("tg-follow");
-    follow.setAttribute("aria-checked", String(s.gimbal.follow && s.gimbal.available));
-    follow.disabled = !s.gimbal.available;
-    follow.title = s.gimbal.available ? "Keep the designated target centred with the gimbal (F)" : "Needs a flight-controller link";
-    $("tg-auto").setAttribute("aria-checked", String(L.auto));
-    $("tg-auto").disabled = !L.enabled;
+    pause.querySelector(".lbl").textContent = s.paused ? "Unfreeze" : "Freeze";
     $("btn-release").disabled = !L.enabled;
+    for (const b of $("seg-gimbal").querySelectorAll("button")) {
+      b.disabled = !s.gimbal.available;
+      b.setAttribute("aria-pressed", String(s.gimbal.available && (b.dataset.v === "follow") === s.gimbal.follow));
+    }
+    for (const b of $("seg-acq").querySelectorAll("button")) {
+      b.disabled = !L.enabled;
+      b.setAttribute("aria-pressed", String((b.dataset.v === "auto") === L.auto));
+    }
+    $("pb-hint").hidden = !(L.enabled && !L.auto && L.designated_id == null && s.tracks.length);
   }
 
-  function renderLock(s) {
-    const L = s.lock;
-    $("lock-card").dataset.state = L.enabled ? L.state : "OFF";
-    setText("lock-state", L.enabled ? L.state.toLowerCase() : "Lock off");
-    setText("lock-mode", !L.enabled ? "Disabled" : L.auto ? "Auto designation" : "Operator designation");
-    setText("lock-tgt", L.track_id != null ? `#${L.track_id}` : L.candidate_id != null ? `#${L.candidate_id} cand.` : "—");
-    setText("lock-time", L.state === "LOCKED" ? `${fmt(L.duration, 1)} s`
-      : L.state === "ACQUIRING" ? `${Math.round(L.progress * 100)} % of ${fmt(L.acquire_s, 1)} s` : "—");
-    setText("lock-ex", L.error ? signed(L.error[0]) : "—");
-    setText("lock-ey", L.error ? signed(L.error[1]) : "—");
-    const C = 2 * Math.PI * 52;
-    const prog = L.state === "LOCKED" ? 1 : L.state === "ACQUIRING" ? L.progress : 0;
-    $("scope-ring").style.strokeDashoffset = (C * (1 - prog)).toFixed(1);
-    const dot = $("scope-dot"), line = $("scope-line");
-    if (L.error) {
-      const x = 60 + clamp(L.error[0], -1, 1) * 52, y = 60 + clamp(L.error[1], -1, 1) * 52;
-      dot.setAttribute("cx", x.toFixed(1)); dot.setAttribute("cy", y.toFixed(1));
-      line.setAttribute("x2", x.toFixed(1)); line.setAttribute("y2", y.toFixed(1));
-      dot.style.opacity = 1; line.style.opacity = 1;
-    } else { dot.style.opacity = 0; line.style.opacity = 0; }
+  function renderTelemetry(s) {
+    const v = s.vehicle, up = v && v.connected;
+    setText("tele-meta", !v ? "No link" : up ? "MAVLink" : "No heartbeat");
+    setText("t-agl", up && v.alt_rel != null ? `${fmt(v.alt_rel, 1)} m` : "—");
+    setText("t-msl", up && v.alt_amsl != null ? `${fmt(v.alt_amsl, 0)} m` : "—");
+    setText("t-gs", up && v.groundspeed != null ? `${fmt(v.groundspeed, 1)} m/s` : "—");
+    setText("t-hdg", up && v.heading != null ? `${deg3(v.heading)}°` : "—");
+    const az = up && v.heading != null ? v.heading + (v.gimbal_yaw || 0) : null;
+    setText("t-az", az != null ? `${deg3(az)}°` : "—");
+    setText("t-el", up && v.gimbal_pitch != null ? `${sgn(v.gimbal_pitch, 1)}°` : "—");
+    setText("t-pos", up && v.lat != null ? `${latDms(v.lat)}  ${lonDms(v.lon)}` : "—");
+    setText("inst-meta", up ? `R ${sgn(v.roll, 1)}°  P ${sgn(v.pitch, 1)}°` : "—");
   }
 
-  function renderVehicle(s) {
-    const v = s.vehicle;
-    $("tele").hidden = !v;
-    $("tele-empty").hidden = !!v;
-    setText("tele-meta", !v ? "No link" : v.connected ? "MAVLink" : "No heartbeat");
-    if (!v) return;
-    setText("t-mode", v.mode || "—");
-    setText("t-armed", v.armed ? "Armed" : "Disarmed");
-    setText("t-alt", v.alt_rel != null ? `${fmt(v.alt_rel, 1)} m AGL` : "—");
-    setText("t-gs", v.groundspeed != null ? `${fmt(v.groundspeed, 1)} m/s` : "—");
-    setText("t-hdg", v.heading != null ? `${String(Math.round(v.heading) % 360).padStart(3, "0")}°` : "—");
-    setText("t-cmd", s.gimbal.cmd ? `${signed(s.gimbal.cmd[0], 1)} / ${signed(s.gimbal.cmd[1], 1)} °/s` : "—");
-    setText("t-gmb", v.gimbal_pitch != null
-      ? `Pitch ${signed(v.gimbal_pitch, 1)}°  Yaw ${signed(v.gimbal_yaw, 1)}°${s.gimbal.active ? "  · following" : ""}`
-      : "No gimbal attitude reported");
-    setText("t-pos", v.lat != null ? `${v.lat.toFixed(6)}, ${v.lon.toFixed(6)}` : "Waiting for GPS");
-    const g = s.target_geo, link = $("t-map");
-    setText("t-tgt", g ? `${g.lat.toFixed(6)}, ${g.lon.toFixed(6)}` : "—");
-    setText("t-rng", g ? `${fmt(g.range_m, 0)} m ground · ${g.method === "dem" ? "terrain model" : "flat ground"}` : "—");
+  function renderTarget(s) {
+    const L = s.lock, g = s.target_geo, v = s.vehicle;
+    const t = s.tracks.find((x) => x.id === L.track_id);
+    setText("tgt-meta", L.enabled ? (L.auto ? "Auto acquire" : "Manual") : "Lock disabled");
+    setText("g-track", t ? `${t.id} · ${t.label} · ${t.score.toFixed(2)}` : L.candidate_id != null ? `${L.candidate_id} (candidate)` : "—");
+    const st = $("g-status");
+    const status = !L.enabled ? "Disabled" : L.state === "LOCKED" ? `TRACK ${fmt(L.duration, 1)} s`
+      : L.state === "ACQUIRING" ? `ACQUIRE ${Math.round(L.progress * 100)}% of ${fmt(L.acquire_s, 1)} s`
+        : L.state === "LOST" ? "COAST (reacquiring)" : "SEARCH";
+    setText("g-status", status);
+    st.dataset.s = L.state === "LOCKED" ? "lock" : L.state === "ACQUIRING" || L.state === "LOST" ? "acq" : "";
+    setText("g-err", L.error ? `X ${sgn(L.error[0], 3)}  Y ${sgn(L.error[1], 3)}` : "—");
+    setText("g-lat", g ? latDms(g.lat) : "—");
+    setText("g-lon", g ? lonDms(g.lon) : "—");
+    setText("g-rng", g ? `${fmt(g.range_m, 0)} m ground${g.slant_m != null ? " · " + fmt(g.slant_m, 0) + " m slant" : ""}` : "—");
+    if (g && v && v.lat != null) setText("g-brg", `${deg3(bearingRange(v.lat, v.lon, g.lat, g.lon)[0])}° true`);
+    else setText("g-brg", "—");
+    const link = $("g-map");
     link.hidden = !g;
     if (g) link.href = `https://www.openstreetmap.org/?mlat=${g.lat}&mlon=${g.lon}#map=18/${g.lat}/${g.lon}`;
   }
 
-  const ROLE = { target: "Target", candidate: "Candidate", track: "Tracked" };
+  const ROLE = { target: "Target", candidate: "Candidate", track: "Track" };
   function renderTracks(s) {
     setText("tracks-meta", `${s.tracks.length} active`);
+    const v = s.vehicle;
     const html = !s.tracks.length
-      ? `<tr class="empty"><td colspan="7">No confirmed tracks yet. A target appears here after the detector has seen it in three frames.</td></tr>`
-      : s.tracks.map((t) => `<tr data-id="${t.id}" data-role="${t.role}" tabindex="0" title="${
-        t.geo ? `${t.geo.lat.toFixed(6)}, ${t.geo.lon.toFixed(6)} · ` : ""}Click to designate track #${t.id}">`
-        + `<td>#${t.id}</td><td>${esc(t.label)}</td><td class="num">${t.score.toFixed(2)}</td>`
-        + `<td class="num">${fmt(t.age_s, 1)} s</td><td class="num">${t.geo ? fmt(t.geo.range_m, 0) + " m" : "—"}</td>`
-        + `<td class="num">${fmt(t.speed_px_s, 0)}</td>`
-        + `<td><span class="role role-${t.role}">${ROLE[t.role]}</span></td></tr>`).join("");
+      ? `<tr class="empty"><td colspan="7">No confirmed tracks. A track is listed after the detector has seen it in three frames.</td></tr>`
+      : s.tracks.map((t) => {
+        const br = t.geo && v && v.lat != null ? deg3(bearingRange(v.lat, v.lon, t.geo.lat, t.geo.lon)[0]) : "—";
+        return `<tr data-id="${t.id}" data-role="${t.role}" title="Designate track ${t.id}">`
+          + `<td>${t.id}</td><td>${esc(t.label)}</td><td class="num">${t.score.toFixed(2)}</td>`
+          + `<td class="num">${fmt(t.age_s, 1)}</td><td class="num">${t.geo ? fmt(t.geo.range_m, 0) : "—"}</td>`
+          + `<td class="num">${br}</td><td class="st-${t.role}">${ROLE[t.role]}</td></tr>`;
+      }).join("");
     setHTML("tracks-body", html);
   }
 
-  const EVENTS = {
-    lock_acquired: ["Lock acquired", "lock"], lock_lost: ["Lock lost", "acq"], designated: ["Designated", "cand"],
-    released: ["Released", "muted"], no_track: ["No track", "muted"], link_up: ["Link up", "track"],
-    link_lost: ["Link lost", "acq"], paused: ["Paused", "muted"], resumed: ["Resumed", "muted"],
-    follow_on: ["Gimbal follow on", "accent"], follow_off: ["Gimbal follow off", "muted"],
-    auto_on: ["Auto designation on", "accent"], auto_off: ["Auto designation off", "muted"],
-    session_start: ["Session started", "muted"], source_end: ["Source ended", "acq"],
+  const MSG = {
+    lock_acquired: ["NOTICE", (e) => `Lock acquired on track ${e.track_id}`],
+    lock_lost: ["WARNING", (e) => `Lock lost on track ${e.track_id}${e.detail ? " after " + e.detail : ""}`],
+    designated: ["INFO", (e) => `Operator designated track ${e.track_id}`],
+    released: ["INFO", (e) => `Lock released${e.track_id != null ? " (track " + e.track_id + ")" : ""}`],
+    no_track: ["INFO", (e) => e.detail || "No track at that position"],
+    link_up: ["INFO", (e) => `Vehicle link up${e.detail ? ", mode " + e.detail : ""}`],
+    link_lost: ["CRITICAL", () => "Vehicle link lost: no heartbeat"],
+    paused: ["INFO", () => "Video frozen"], resumed: ["INFO", () => "Video resumed"],
+    follow_on: ["INFO", () => "Gimbal follow on"], follow_off: ["INFO", () => "Gimbal follow off, gimbal holding"],
+    auto_on: ["INFO", () => "Auto acquisition on"], auto_off: ["INFO", () => "Auto acquisition off, operator designates"],
+    session_start: ["INFO", (e) => `Session started (${e.detail || "video"})`],
+    source_end: ["WARNING", () => "Video source ended"],
   };
-  function renderEvents(s) {
-    setText("events-meta", `${s.events.length} logged`);
-    const html = !s.events.length ? `<li class="empty">Lock, designation and link events appear here.</li>`
+  function renderLog(s) {
+    setText("msg-meta", `${s.events.length}`);
+    const html = !s.events.length ? `<li class="empty">Lock, designation and link messages appear here.</li>`
       : s.events.slice().reverse().map((e) => {
-        const [label, tone] = EVENTS[e.kind] || [e.kind, "muted"];
-        const id = e.track_id != null ? ` #${e.track_id}` : "";
-        return `<li><time>${esc(e.utc)}</time><span class="ev ev-${tone}">${label}${id}</span>`
-          + `<span class="ev-detail">${esc(e.detail || "")}</span></li>`;
+        const [sev, text] = MSG[e.kind] || ["INFO", () => e.kind];
+        return `<li><time>${esc(e.utc)}</time><span class="sev-${sev.toLowerCase()}">${sev}</span><span class="msg">${esc(text(e))}</span></li>`;
       }).join("");
-    setHTML("events", html);
+    setHTML("log", html);
   }
 
   /* ------------------------------------------------------------------ canvas helpers */
@@ -303,192 +312,211 @@
     ctx.setTransform(d, 0, 0, d, 0, 0);
     return { ctx, w: r.width, h: r.height };
   }
-  const niceMax = (v) => {
-    const p = Math.pow(10, Math.floor(Math.log10(v || 1)));
-    for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p;
-    return 10 * p;
-  };
+  function seg(ctx, x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
 
-  /* Single-series sparkline: faint grid, area fill, 2px line, emphasised endpoint, hover readout. */
-  function drawSpark(id, series, o) {
-    const { ctx, w, h } = fit($(id));
+  /* Attitude indicator: sky / ground ball, pitch ladder, roll scale, fixed aircraft symbol. */
+  function drawADI() {
+    const { ctx, w, h } = fit($("adi"));
     ctx.clearRect(0, 0, w, h);
-    const now = performance.now() / 1000;
-    const L = 40, R = 8, T = 6, B = 16, pw = w - L - R, ph = h - T - B;
-    const vals = series.filter((p) => p[1] != null).map((p) => p[1]);
-    const vmax = niceMax(Math.max(o.floor, ...vals) * 1.1);
-    const X = (t) => L + pw * (1 - (now - t) / WINDOW_S);
-    const Y = (v) => T + ph * (1 - Math.min(v, vmax) / vmax);
-    const ink3 = tok("--ink-3"), accent = tok("--accent"), mono = tok("--font-data");
-    ctx.font = `10px ${mono}`;
-    ctx.lineWidth = 1;
-    for (const f of [0, 0.5, 1]) {
-      const y = Math.round(T + ph * (1 - f)) + 0.5;
-      ctx.strokeStyle = f === 0 ? tok("--line") : tok("--grid");
-      ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(w - R, y); ctx.stroke();
-      ctx.fillStyle = ink3; ctx.textAlign = "right"; ctx.textBaseline = "middle";
-      ctx.fillText(o.fmt(vmax * f), L - 6, y);
+    const v = S.last && S.last.vehicle, up = v && v.connected;
+    const roll = up ? v.roll || 0 : 0, pitch = up ? v.pitch || 0 : 0;
+    const cx = w / 2, cy = h / 2, R = Math.min(w, h) / 2 - 2, ppd = R / 32;
+    const mono = tok("--mono");
+    ctx.save();
+    ctx.beginPath(); ctx.arc(cx, cy, R, 0, 2 * Math.PI); ctx.clip();
+    ctx.translate(cx, cy); ctx.rotate(-roll * D2R); ctx.translate(0, pitch * ppd);
+    ctx.fillStyle = up ? tok("--sky") : "#3a3d40"; ctx.fillRect(-2 * R, -4 * R, 4 * R, 4 * R);
+    ctx.fillStyle = up ? tok("--ground") : "#2c2e30"; ctx.fillRect(-2 * R, 0, 4 * R, 4 * R);
+    ctx.strokeStyle = "#ffffff"; ctx.fillStyle = "#ffffff"; ctx.lineWidth = 1.5;
+    seg(ctx, -2 * R, 0, 2 * R, 0);
+    ctx.lineWidth = 1; ctx.font = `9px ${mono}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    for (let p = -30; p <= 30; p += 5) {
+      if (!p) continue;
+      const y = -p * ppd, half = p % 10 ? R * 0.1 : R * 0.22;
+      seg(ctx, -half, y, half, y);
+      if (p % 10 === 0) { ctx.fillText(String(Math.abs(p)), -half - 9, y); ctx.fillText(String(Math.abs(p)), half + 9, y); }
     }
-    ctx.textBaseline = "alphabetic";
-    ctx.textAlign = "left"; ctx.fillText("−30 s", L, h - 3);
-    ctx.textAlign = "center"; ctx.fillText("−15 s", L + pw / 2, h - 3);
-    ctx.textAlign = "right"; ctx.fillText("now", w - R, h - 3);
+    ctx.restore();
 
-    const segs = [];
-    let cur = [];
-    for (const [t, v] of series) {
-      if (v == null) { if (cur.length) segs.push(cur); cur = []; } else cur.push([X(t), Y(v)]);
+    ctx.save(); ctx.translate(cx, cy);
+    ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 1.5;
+    const rr = R * 0.84;
+    ctx.beginPath(); ctx.arc(0, 0, rr, -150 * D2R, -30 * D2R); ctx.stroke();
+    for (const a of [-60, -45, -30, -20, -10, 0, 10, 20, 30, 45, 60]) {
+      const t = (a - 90) * D2R, len = a % 30 === 0 ? R * 0.1 : R * 0.06;
+      seg(ctx, Math.cos(t) * rr, Math.sin(t) * rr, Math.cos(t) * (rr - len), Math.sin(t) * (rr - len));
     }
-    if (cur.length) segs.push(cur);
-    for (const sg of segs) {
-      if (sg.length < 2) continue;
-      ctx.beginPath();
-      ctx.moveTo(sg[0][0], T + ph);
-      for (const [x, y] of sg) ctx.lineTo(x, y);
-      ctx.lineTo(sg[sg.length - 1][0], T + ph);
-      ctx.closePath();
-      ctx.globalAlpha = 0.16; ctx.fillStyle = accent; ctx.fill(); ctx.globalAlpha = 1;
-      ctx.beginPath();
-      sg.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
-      ctx.strokeStyle = accent; ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.stroke();
-    }
-    const tail = series[series.length - 1];
-    if (tail && tail[1] != null) {
-      ctx.beginPath(); ctx.arc(X(tail[0]), Y(tail[1]), 4, 0, 2 * Math.PI);
-      ctx.fillStyle = accent; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = tok("--surface"); ctx.stroke();
-    }
-    setText(id + "-v", tail && tail[1] != null ? o.fmt(tail[1], true) : o.none);
+    ctx.rotate(-roll * D2R);
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath(); ctx.moveTo(0, -rr + 2); ctx.lineTo(-5, -rr + 10); ctx.lineTo(5, -rr + 10); ctx.closePath(); ctx.fill();
+    ctx.restore();
 
-    const hx = S.hover[id];
-    if (hx != null && hx >= L && hx <= w - R && series.length) {
-      const tt = now - (1 - (hx - L) / pw) * WINDOW_S;
-      let best = series[0];
-      for (const p of series) if (Math.abs(p[0] - tt) < Math.abs(best[0] - tt)) best = p;
-      ctx.strokeStyle = ink3; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
-      ctx.beginPath(); ctx.moveTo(hx + 0.5, T); ctx.lineTo(hx + 0.5, T + ph); ctx.stroke(); ctx.setLineDash([]);
-      if (best[1] != null) {
-        ctx.beginPath(); ctx.arc(X(best[0]), Y(best[1]), 4, 0, 2 * Math.PI);
-        ctx.fillStyle = accent; ctx.fill(); ctx.strokeStyle = tok("--surface"); ctx.lineWidth = 2; ctx.stroke();
-      }
-      const label = `${best[1] != null ? o.fmt(best[1], true) : o.none} · ${(now - best[0]).toFixed(1)} s ago`;
-      ctx.font = `11px ${mono}`;
-      const tw = ctx.measureText(label).width + 12;
-      const bx = clamp(hx + 8, L, w - R - tw);
-      ctx.fillStyle = tok("--surface-2"); ctx.strokeStyle = tok("--line");
-      ctx.beginPath(); ctx.rect(bx, T, tw, 18); ctx.fill(); ctx.stroke();
-      ctx.fillStyle = tok("--ink"); ctx.textAlign = "left"; ctx.textBaseline = "middle";
-      ctx.fillText(label, bx + 6, T + 9.5);
-    }
+    ctx.strokeStyle = "#f2b01e"; ctx.lineWidth = 3; ctx.lineCap = "square";
+    seg(ctx, cx - R * 0.55, cy, cx - R * 0.2, cy); seg(ctx, cx - R * 0.2, cy, cx - R * 0.2, cy + R * 0.08);
+    seg(ctx, cx + R * 0.2, cy, cx + R * 0.55, cy); seg(ctx, cx + R * 0.2, cy, cx + R * 0.2, cy + R * 0.08);
+    ctx.fillStyle = "#f2b01e"; ctx.fillRect(cx - 2, cy - 2, 4, 4);
+    ctx.lineCap = "butt"; ctx.lineWidth = 2; ctx.strokeStyle = tok("--edge");
+    ctx.beginPath(); ctx.arc(cx, cy, R, 0, 2 * Math.PI); ctx.stroke();
+    if (!up) { ctx.fillStyle = "#c8ccd0"; ctx.font = `11px ${tok("--ui")}`; ctx.textAlign = "center"; ctx.fillText("No attitude", cx, cy + R * 0.45); }
   }
 
-  /* Tactical plot: north up, vehicle at the centre, range rings, camera footprint, targets. */
-  const RINGS = [60, 90, 150, 300, 600, 900, 1500, 3000, 6000];
-  function drawMap() {
-    const { ctx, w, h } = fit($("map"));
+  /* Heading indicator: rotating compass card, sensor field of view wedge, target bearing bug. */
+  function drawHSI() {
+    const { ctx, w, h } = fit($("hsi"));
     ctx.clearRect(0, 0, w, h);
+    const s = S.last, v = s && s.vehicle, up = v && v.connected;
+    const hdg = up ? (v.heading != null ? v.heading : v.yaw || 0) : 0;
+    const cx = w / 2, cy = h / 2, R = Math.min(w, h) / 2 - 2, mono = tok("--mono");
+    ctx.fillStyle = "#151719"; ctx.beginPath(); ctx.arc(cx, cy, R, 0, 2 * Math.PI); ctx.fill();
+    ctx.save(); ctx.translate(cx, cy);
+    if (up && v.gimbal_yaw != null) {
+      const half = (s.camera_hfov || 60) / 2, a = (v.gimbal_yaw - 90) * D2R;
+      ctx.fillStyle = "rgba(61, 134, 216, 0.28)"; ctx.strokeStyle = "rgba(110, 170, 235, 0.9)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, R * 0.78, a - half * D2R, a + half * D2R); ctx.closePath(); ctx.fill(); ctx.stroke();
+    }
+    ctx.rotate(-hdg * D2R);
+    ctx.strokeStyle = "#e8e8e8"; ctx.fillStyle = "#e8e8e8"; ctx.lineWidth = 1;
+    ctx.font = `10px ${mono}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    for (let d = 0; d < 360; d += 5) {
+      const t = (d - 90) * D2R, len = d % 10 ? R * 0.06 : R * 0.11;
+      seg(ctx, Math.cos(t) * R * 0.97, Math.sin(t) * R * 0.97, Math.cos(t) * (R * 0.97 - len), Math.sin(t) * (R * 0.97 - len));
+      if (d % 30 === 0) {
+        const label = { 0: "N", 90: "E", 180: "S", 270: "W" }[d] || String(d / 10);
+        ctx.save(); ctx.translate(Math.cos(t) * R * 0.74, Math.sin(t) * R * 0.74); ctx.rotate(d * D2R);
+        ctx.font = d % 90 ? `10px ${mono}` : `bold 11px ${mono}`; ctx.fillText(label, 0, 0); ctx.restore();
+      }
+    }
+    const g = s && s.target_geo;
+    if (up && g && v.lat != null) {
+      const b = bearingRange(v.lat, v.lon, g.lat, g.lon)[0], t = (b - 90) * D2R, r = R * 0.9;
+      ctx.fillStyle = "#e5484d"; ctx.save(); ctx.translate(Math.cos(t) * r, Math.sin(t) * r); ctx.rotate(b * D2R);
+      ctx.beginPath(); ctx.moveTo(0, -6); ctx.lineTo(5, 0); ctx.lineTo(0, 6); ctx.lineTo(-5, 0); ctx.closePath(); ctx.fill(); ctx.restore();
+    }
+    ctx.restore();
+    ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2;
+    seg(ctx, cx, cy - R * 0.22, cx, cy + R * 0.18); seg(ctx, cx - R * 0.18, cy - R * 0.02, cx + R * 0.18, cy - R * 0.02);
+    seg(ctx, cx - R * 0.08, cy + R * 0.16, cx + R * 0.08, cy + R * 0.16);
+    ctx.fillStyle = "#f2b01e"; ctx.beginPath(); ctx.moveTo(cx, cy - R + 1); ctx.lineTo(cx - 6, cy - R - 0 + 10); ctx.lineTo(cx + 6, cy - R + 10); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#000000"; ctx.fillRect(cx - 19, cy + R * 0.42 - 9, 38, 18);
+    ctx.strokeStyle = "#e8e8e8"; ctx.lineWidth = 1; ctx.strokeRect(cx - 19, cy + R * 0.42 - 9, 38, 18);
+    ctx.fillStyle = "#ffffff"; ctx.font = `12px ${mono}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(up ? deg3(hdg) : "---", cx, cy + R * 0.42 + 1);
+    ctx.lineWidth = 2; ctx.strokeStyle = tok("--edge"); ctx.beginPath(); ctx.arc(cx, cy, R, 0, 2 * Math.PI); ctx.stroke();
+  }
+
+  /* Map: north up, metric grid, sensor footprint, track symbols, vehicle and its track. */
+  const GRID = [10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000];
+  function drawMap() {
+    const { ctx, w, h } = fit(map);
     const s = S.last, v = s && s.vehicle;
-    const label = tok("--font-label"), mono = tok("--font-data");
+    ctx.fillStyle = tok("--bg"); ctx.fillRect(0, 0, w, h);
+    const small = w < 420, mono = tok("--mono"), fs = small ? 9 : 11;
     if (!v || !v.connected || v.lat == null) {
-      ctx.textAlign = "center";
-      ctx.fillStyle = tok("--ink-2"); ctx.font = `600 12px ${label}`;
-      ctx.fillText(s && s.gimbal.available ? "WAITING FOR VEHICLE POSITION" : "NO VEHICLE LINK", w / 2, h / 2 - 8);
-      ctx.fillStyle = tok("--ink-3"); ctx.font = `12px ${tok("--font-body")}`;
-      ctx.fillText(s && s.gimbal.available ? "No heartbeat or GPS position yet" : "Start with --mavlink or the sim source", w / 2, h / 2 + 14);
-      setText("map-meta", "North up");
+      ctx.fillStyle = tok("--text-3"); ctx.font = `${small ? 11 : 13}px ${tok("--ui")}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(s && s.gimbal.available ? "Waiting for vehicle position" : "No vehicle link", w / 2, h / 2);
       return;
     }
-    const k = Math.cos(v.lat * Math.PI / 180);
+    const k = Math.cos(v.lat * D2R);
     const ne = (lat, lon) => [(lat - v.lat) * M_PER_DEG, (lon - v.lon) * M_PER_DEG * k];
-    // Scale to the targets; a shallow camera footprint can reach kilometres, so it only sets
-    // the scale when nothing is tracked and is otherwise clipped to the plot circle.
     let ext = 0;
-    for (const t of s.tracks) if (t.geo) ext = Math.max(ext, t.geo.range_m * 1.35);
+    for (const t of s.tracks) if (t.geo) ext = Math.max(ext, t.geo.range_m * 1.3);
     if (!ext && s.footprint) {
       const d = s.footprint.filter(Boolean).map((p) => Math.hypot(p[0], p[1]));
       if (d.length) ext = Math.min(...d) * 1.6;
     }
-    ext = Math.max(ext, 50);
-    const R = RINGS.find((x) => x >= ext) || RINGS[RINGS.length - 1];
-    const cx = w / 2, cy = h / 2, sc = (Math.min(w, h) / 2 - 24) / R;
+    ext = Math.max(ext, 60);
+    const sc = (Math.min(w, h) / 2 - 14) / ext;
+    const cx = w / 2, cy = h / 2;
     const P = (n, e) => [cx + e * sc, cy - n * sc];
+    const step = GRID.find((g) => g * sc >= (small ? 34 : 48)) || 5000;
+    ctx.strokeStyle = tok("--grid"); ctx.lineWidth = 1;
+    const e0 = Math.floor((-cx / sc) / step) * step, n0 = Math.floor((-(h - cy) / sc) / step) * step;
+    for (let e = e0; e * sc + cx <= w; e += step) { const x = Math.round(cx + e * sc) + 0.5; seg(ctx, x, 0, x, h); }
+    for (let n = n0; cy - n * sc >= 0; n += step) { const y = Math.round(cy - n * sc) + 0.5; seg(ctx, 0, y, w, y); }
 
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = tok("--grid");
-    ctx.beginPath();
-    ctx.moveTo(cx, cy - R * sc); ctx.lineTo(cx, cy + R * sc);
-    ctx.moveTo(cx - R * sc, cy); ctx.lineTo(cx + R * sc, cy);
-    ctx.stroke();
-    ctx.font = `10px ${mono}`; ctx.fillStyle = tok("--ink-3"); ctx.textAlign = "left"; ctx.textBaseline = "bottom";
-    for (const f of [1 / 3, 2 / 3, 1]) {
-      ctx.strokeStyle = f === 1 ? tok("--line") : tok("--grid");
-      ctx.beginPath(); ctx.arc(cx, cy, R * f * sc, 0, 2 * Math.PI); ctx.stroke();
-      const a = -Math.PI / 4;
-      ctx.fillText(`${Math.round(R * f)} m`, cx + Math.cos(a) * R * f * sc + 3, cy + Math.sin(a) * R * f * sc - 1);
-    }
-    ctx.font = `600 11px ${label}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    const rr = R * sc + 12;
-    [["N", 0, -rr, "--ink"], ["E", rr, 0, "--ink-3"], ["S", 0, rr, "--ink-3"], ["W", -rr, 0, "--ink-3"]]
-      .forEach(([t, dx, dy, c]) => { ctx.fillStyle = tok(c); ctx.fillText(t, cx + dx, cy + dy); });
-
-    ctx.save();
-    ctx.beginPath(); ctx.arc(cx, cy, R * sc, 0, 2 * Math.PI); ctx.clip();
     if (S.trail.length > 1) {
-      ctx.beginPath();
+      ctx.strokeStyle = tok("--text-3"); ctx.lineWidth = 1; ctx.beginPath();
       S.trail.forEach(([, la, lo], i) => { const [x, y] = P(...ne(la, lo)); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
-      ctx.strokeStyle = tok("--ink-3"); ctx.setLineDash([2, 4]); ctx.stroke(); ctx.setLineDash([]);
+      ctx.stroke();
     }
     if (s.footprint && s.footprint.every(Boolean)) {
       ctx.beginPath();
       s.footprint.forEach(([n, e], i) => { const [x, y] = P(n, e); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
-      ctx.closePath();
-      ctx.globalAlpha = 0.14; ctx.fillStyle = tok("--accent"); ctx.fill(); ctx.globalAlpha = 1;
+      ctx.closePath(); ctx.fillStyle = "rgba(61, 134, 216, 0.16)"; ctx.fill();
       ctx.strokeStyle = tok("--accent"); ctx.lineWidth = 1; ctx.stroke();
     }
-    const stateCol = { LOCKED: "--lock", ACQUIRING: "--acq", LOST: "--acq" }[s.lock.state] || "--cand";
     const tgt = s.tracks.find((t) => t.role === "target" && t.geo);
     if (tgt) {
       const [x, y] = P(...ne(tgt.geo.lat, tgt.geo.lon));
-      ctx.strokeStyle = tok(stateCol); ctx.setLineDash([5, 4]); ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(x, y); ctx.stroke(); ctx.setLineDash([]);
+      ctx.strokeStyle = tok("--text-2"); ctx.setLineDash([4, 3]); seg(ctx, cx, cy, x, y); ctx.setLineDash([]);
     }
-    ctx.restore();
+    ctx.font = `${fs}px ${mono}`; ctx.textAlign = "left"; ctx.textBaseline = "middle";
     for (const t of s.tracks) {
       if (!t.geo) continue;
       const [x, y] = P(...ne(t.geo.lat, t.geo.lon));
-      ctx.lineWidth = 2; ctx.strokeStyle = tok("--plot");
       if (t.role === "target") {
-        ctx.fillStyle = tok(stateCol);
-        ctx.beginPath(); ctx.moveTo(x, y - 8); ctx.lineTo(x + 8, y); ctx.lineTo(x, y + 8); ctx.lineTo(x - 8, y); ctx.closePath();
-        ctx.fill(); ctx.stroke();
-      } else if (t.role === "candidate") {
-        ctx.strokeStyle = tok("--cand"); ctx.beginPath(); ctx.arc(x, y, 6, 0, 2 * Math.PI); ctx.stroke();
-      } else {
-        ctx.fillStyle = tok("--track"); ctx.fillRect(x - 4.5, y - 4.5, 9, 9); ctx.strokeRect(x - 4.5, y - 4.5, 9, 9);
+        ctx.fillStyle = tok("--crit"); ctx.strokeStyle = "#000000"; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(x, y - 7); ctx.lineTo(x + 7, y); ctx.lineTo(x, y + 7); ctx.lineTo(x - 7, y); ctx.closePath(); ctx.fill(); ctx.stroke();
+      } else {  // unknown track: quatrefoil frame
+        ctx.fillStyle = tok("--track");
+        for (const [dx, dy] of [[-2.6, 0], [2.6, 0], [0, -2.6], [0, 2.6]]) { ctx.beginPath(); ctx.arc(x + dx, y + dy, 3.2, 0, 2 * Math.PI); ctx.fill(); }
       }
-      ctx.fillStyle = tok("--ink"); ctx.font = `11px ${mono}`; ctx.textAlign = "left"; ctx.textBaseline = "middle";
-      ctx.fillText(t.role === "target" ? `#${t.id}  ${Math.round(t.geo.range_m)} m` : `#${t.id}`, x + 11, y - 8);
+      ctx.fillStyle = tok("--text");
+      ctx.fillText(t.role === "target" ? `${t.id} ${Math.round(t.geo.range_m)}m` : `${t.id}`, x + 9, y - 7);
     }
-    const hd = ((v.heading != null ? v.heading : v.yaw) || 0) * Math.PI / 180;
+    const hd = (v.heading != null ? v.heading : v.yaw || 0) * D2R;
     ctx.save(); ctx.translate(cx, cy); ctx.rotate(hd);
-    ctx.beginPath(); ctx.moveTo(0, -11); ctx.lineTo(8, 9); ctx.lineTo(0, 4); ctx.lineTo(-8, 9); ctx.closePath();
-    ctx.fillStyle = tok("--ink"); ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = tok("--plot"); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, -10); ctx.lineTo(7, 8); ctx.lineTo(0, 4); ctx.lineTo(-7, 8); ctx.closePath();
+    ctx.fillStyle = "#e5484d"; ctx.fill(); ctx.strokeStyle = "#000000"; ctx.lineWidth = 1; ctx.stroke();
     ctx.restore();
-    setText("map-meta", `North up · rings ${Math.round(R / 3)} m`);
+    // scale bar and north arrow
+    const bar = step * sc, bx = 8, by = h - 10;
+    ctx.strokeStyle = tok("--text"); ctx.lineWidth = 2; seg(ctx, bx, by, bx + bar, by);
+    ctx.lineWidth = 1; seg(ctx, bx, by - 4, bx, by + 2); seg(ctx, bx + bar, by - 4, bx + bar, by + 2);
+    ctx.fillStyle = tok("--text"); ctx.textBaseline = "bottom"; ctx.fillText(`${step} m`, bx + 2, by - 4);
+    ctx.textAlign = "center"; ctx.font = `bold ${fs + 1}px ${mono}`; ctx.fillText("N", w - 14, 22);
+    ctx.beginPath(); ctx.moveTo(w - 14, 24); ctx.lineTo(w - 18, 34); ctx.lineTo(w - 10, 34); ctx.closePath(); ctx.fill();
   }
 
-  /* ------------------------------------------------------------------ main loop */
-  const errFmt = (v, unit) => v.toFixed(unit ? 3 : 2);
-  const latFmt = (v, unit) => (unit ? `${v.toFixed(1)} ms` : `${Math.round(v)}`);
-  function frame() {
-    if (dirty) {
-      dirty = false;
-      drawSpark("sp-err", S.err, { fmt: errFmt, floor: 0.1, none: "no target" });
-      drawSpark("sp-lat", S.lat, { fmt: latFmt, floor: 10, none: "—" });
-      drawMap();
+  /* Tracking error strip chart: one series, recessive grid, hover readout. */
+  function drawStrip() {
+    const { ctx, w, h } = fit(strip);
+    ctx.fillStyle = tok("--bg"); ctx.fillRect(0, 0, w, h);
+    const now = performance.now() / 1000, L = 28, T = 4, B = 4, R = 4, pw = w - L - R, ph = h - T - B;
+    const vmax = Math.max(0.2, ...S.err.filter((p) => p[1] != null).map((p) => p[1])) > 0.5 ? 1 : 0.5;
+    const X = (t) => L + pw * (1 - (now - t) / WINDOW_S), Y = (v) => T + ph * (1 - Math.min(v, vmax) / vmax);
+    const mono = tok("--mono");
+    ctx.strokeStyle = tok("--grid"); ctx.lineWidth = 1; ctx.font = `9px ${mono}`; ctx.fillStyle = tok("--text-3");
+    ctx.textAlign = "right"; ctx.textBaseline = "middle";
+    for (const f of [0, 0.5, 1]) { const y = Math.round(T + ph * (1 - f)) + 0.5; seg(ctx, L, y, w - R, y); ctx.fillText((vmax * f).toFixed(2), L - 4, y); }
+    for (let k = 1; k < 6; k++) { const x = Math.round(L + pw * k / 6) + 0.5; seg(ctx, x, T, x, T + ph); }
+    ctx.strokeStyle = tok("--accent"); ctx.lineWidth = 1.5; ctx.beginPath();
+    let pen = false;
+    for (const [t, v] of S.err) {
+      if (v == null) { pen = false; continue; }
+      const x = X(t), y = Y(v);
+      if (pen) ctx.lineTo(x, y); else { ctx.moveTo(x, y); pen = true; }
     }
+    ctx.stroke();
+    if (S.hover != null && S.err.length && S.hover >= L) {
+      const tt = now - (1 - (S.hover - L) / pw) * WINDOW_S;
+      let best = S.err[0];
+      for (const p of S.err) if (Math.abs(p[0] - tt) < Math.abs(best[0] - tt)) best = p;
+      ctx.strokeStyle = tok("--text-3"); ctx.setLineDash([2, 2]); seg(ctx, S.hover + 0.5, T, S.hover + 0.5, T + ph); ctx.setLineDash([]);
+      const label = `${best[1] != null ? best[1].toFixed(3) : "no target"}  ${(now - best[0]).toFixed(1)} s ago`;
+      ctx.font = `10px ${mono}`;
+      const tw = ctx.measureText(label).width + 8, bx = clamp(S.hover + 6, L, w - R - tw);
+      ctx.fillStyle = tok("--pane-2"); ctx.fillRect(bx, T, tw, 14); ctx.strokeStyle = tok("--line"); ctx.strokeRect(bx, T, tw, 14);
+      ctx.fillStyle = tok("--text"); ctx.textAlign = "left"; ctx.fillText(label, bx + 4, T + 7.5);
+    }
+  }
+
+  /* ------------------------------------------------------------------ loop */
+  function frame() {
+    if (dirty) { dirty = false; drawADI(); drawHSI(); drawMap(); drawStrip(); }
     requestAnimationFrame(frame);
   }
-  setInterval(() => { setText("clock", new Date().toISOString().slice(11, 19) + " UTC"); }, 1000);
+  setInterval(() => { setText("v-clock", new Date().toISOString().slice(11, 19) + "Z"); }, 1000);
   connect();
   requestAnimationFrame(frame);
 })();

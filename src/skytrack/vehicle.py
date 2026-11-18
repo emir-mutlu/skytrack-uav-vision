@@ -28,7 +28,8 @@ from typing import Any
 
 from .config import MavlinkConfig
 
-STREAM_MSG_IDS = (33, 30, 285, 158)  # GLOBAL_POSITION_INT, ATTITUDE, GIMBAL_DEVICE_ATTITUDE_STATUS, MOUNT_STATUS
+# GLOBAL_POSITION_INT, ATTITUDE, GIMBAL_DEVICE_ATTITUDE_STATUS, MOUNT_STATUS, SYS_STATUS, GPS_RAW_INT
+STREAM_MSG_IDS = (33, 30, 285, 158, 1, 24)
 
 
 def _mavutil():
@@ -82,6 +83,10 @@ class VehicleState:
     gimbal_pitch_deg: float | None = None
     gimbal_yaw_deg: float | None = None  # relative to the vehicle nose
     gimbal_source: str = ""
+    battery_v: float | None = None
+    battery_pct: int | None = None
+    gps_fix: int | None = None  # GPS_FIX_TYPE: 0-1 none, 2 2D, 3 3D, 4 DGPS, 5 RTK float, 6 RTK fixed
+    gps_sats: int | None = None
 
     def connected(self, timeout: float = 3.0) -> bool:
         return self.last_heartbeat is not None and time.monotonic() - self.last_heartbeat < timeout
@@ -100,6 +105,8 @@ class VehicleState:
             "roll": r(math.degrees(self.roll), 2), "pitch": r(math.degrees(self.pitch), 2),
             "yaw": r(math.degrees(self.yaw), 2),
             "gimbal_pitch": r(self.gimbal_pitch_deg, 2), "gimbal_yaw": r(self.gimbal_yaw_deg, 2),
+            "battery_v": r(self.battery_v, 2), "battery_pct": self.battery_pct,
+            "gps_fix": self.gps_fix, "gps_sats": self.gps_sats,
         }
 
 
@@ -245,6 +252,14 @@ class MavlinkLink:
                 s.gimbal_pitch_deg, s.gimbal_yaw_deg = math.degrees(gp), wrap180(yaw_deg)
                 s.gimbal_source = "gimbal_v2"
                 self._have_gimbal_v2 = True
+                return
+            elif kind == "SYS_STATUS":
+                s.battery_v = None if msg.voltage_battery in (0, 65535) else msg.voltage_battery / 1000.0
+                s.battery_pct = None if msg.battery_remaining < 0 else int(msg.battery_remaining)
+                return
+            elif kind == "GPS_RAW_INT":
+                s.gps_fix = int(msg.fix_type)
+                s.gps_sats = None if msg.satellites_visible == 255 else int(msg.satellites_visible)
                 return
             elif kind == "COMMAND_ACK":
                 self.acks[msg.command] = msg.result

@@ -1,8 +1,9 @@
-"""Operator HUD overlay.
+"""Payload video symbology (operator HUD).
 
-Geometry (brackets, reticle, arcs, translucent panels) is drawn with anti-aliased
-OpenCV primitives; all text is rendered in a single Pillow pass with TrueType fonts,
-so labels stay crisp at any resolution. Every size scales with frame height, so the
+Monochrome symbology in the style of EO/IR gimbal payloads: boresight reticle, track
+gates, sensor azimuth tape, gimbal elevation scale and corner data blocks. Geometry is
+drawn with anti-aliased OpenCV primitives; text is rendered from cached TrueType glyphs
+with a black outline, so it stays crisp and readable over any terrain. Every size scales with frame height, so the
 same layout works from 480p ground-station previews to 4K recordings.
 
 Fonts are picked from the system (Bahnschrift / Cascadia Mono on Windows, DejaVu on
@@ -257,32 +258,106 @@ def _dashed(img, p1, p2, color, t, dash: int, gap: int) -> None:
         d += dash + gap
 
 
-def _track_color(t: Track, lock: LockStatus, state_col) -> tuple[int, int, int]:
-    if t.track_id == lock.track_id:
-        return state_col
-    return CYAN if t.track_id == lock.candidate_id else TEAL
+# ----------------------------------------------------------------------------- symbology
+# Monochrome white symbology with a black outline, as burned into EO/IR payload video:
+# readable over sky, terrain and snow alike, and nothing competes with the scene for colour.
+SYM = WHITE
+SYM_DIM = (196, 196, 196)
+WARN = AMBER
 
 
-def _vehicle_rows(vs: VehicleState, geo: GeoPoint | None, follow: bool,
-                  timeout: float) -> list[tuple[str, str, tuple[int, int, int]]]:
-    if not vs.connected(timeout):
-        return [("LINK", "NO HEARTBEAT", AMBER)]
-    rows = [("LINK", f"{vs.mode or '?'} · {'ARMED' if vs.armed else 'DISARMED'}",
-             TEAL if vs.armed else GREY)]
-    if vs.has_position:
-        rows.append(("POS", f"{vs.lat:.6f} {vs.lon:.6f}", WHITE))
-        hdg = f"{vs.heading_deg:03.0f}°" if vs.heading_deg is not None else "---"
-        rows.append(("ALT", f"{vs.alt_rel:5.1f} m   HDG {hdg}", WHITE))
-        if vs.groundspeed is not None:
-            rows.append(("GS", f"{vs.groundspeed:4.1f} m/s", WHITE))
-    if vs.gimbal_pitch_deg is not None:
-        rows.append(("GMB", f"P{vs.gimbal_pitch_deg:+.1f}°  Y{vs.gimbal_yaw_deg or 0.0:+.1f}°", WHITE))
-    if follow:
-        rows.append(("CAM", "FOLLOWING TARGET", CYAN))
-    if geo is not None:
-        rows.append(("TGT", f"{geo.lat:.6f} {geo.lon:.6f}", RED))
-        rows.append(("RNG", f"{geo.ground_range_m:.0f} m   {geo.method.upper()}", RED))
-    return rows
+def _dms(value: float, pos: str, neg: str, deg_digits: int) -> str:
+    v = abs(value)
+    d = int(v)
+    m = int((v - d) * 60)
+    s = (v - d - m / 60.0) * 3600.0
+    return f"{d:0{deg_digits}d}°{m:02d}'{s:04.1f}\"{pos if value >= 0 else neg}"
+
+
+def latlon_dms(lat: float, lon: float) -> str:
+    return f"{_dms(lat, 'N', 'S', 2)} {_dms(lon, 'E', 'W', 3)}"
+
+
+def _tri(img, pts, color) -> None:
+    p = np.array(pts, np.int32)
+    cv2.fillConvexPoly(img, p, OUTLINE, AA)
+    cv2.polylines(img, [p], True, OUTLINE, 3, AA)
+    cv2.fillConvexPoly(img, p, color, AA)
+
+
+def _readout(cv: _Canvas, img, x: float, y: float, text: str, size: float = 13) -> None:
+    """Boxed numeric readout (black box, white frame), as on a heading or elevation tape."""
+    px = cv.px
+    tw = cv.text_width(text, size, "mono")
+    hw, hh = tw / 2 + px(6), px(size * 0.75)
+    cv2.rectangle(img, (int(x - hw), int(y - hh)), (int(x + hw), int(y + hh)), OUTLINE, -1)
+    cv2.rectangle(img, (int(x - hw), int(y - hh)), (int(x + hw), int(y + hh)), SYM, 1, AA)
+    cv.text((x, y), text, SYM, size, "mono", "mm")
+
+
+def _heading_tape(cv: _Canvas, img, cx: int, top: int, width: int, heading: float) -> None:
+    px, span = cv.px, 30.0
+    ppd = (width / 2) / span
+    base = top + px(16)
+    for d in range(int(math.floor(heading - span)), int(math.ceil(heading + span)) + 1):
+        if d % 5:
+            continue
+        x = cx + (d - heading) * ppd
+        major = d % 10 == 0
+        _line(img, (int(x), base), (int(x), base + (px(9) if major else px(5))), SYM, 1)
+        if major:
+            label = {0: "N", 90: "E", 180: "S", 270: "W"}.get(d % 360, f"{d % 360:03d}")
+            cv.text((x, base - px(3)), label, SYM, 11, "mono", "md", stroke=1)
+    _tri(img, [(cx, base + px(11)), (cx - px(5), base + px(19)), (cx + px(5), base + px(19))], SYM)
+    _readout(cv, img, cx, base + px(32), f"{heading % 360:05.1f}")
+
+
+def _elevation_scale(cv: _Canvas, img, x: int, cy: int, height: int, pitch: float) -> None:
+    px = cv.px
+    top = cy - height / 2
+
+    def ypos(p: float) -> int:
+        return int(top + (min(max(-p, 0.0), 90.0) / 90.0) * height)
+
+    _line(img, (x, ypos(0)), (x, ypos(-90)), SYM, 1)
+    for p in range(0, -91, -10):
+        major = p % 30 == 0
+        _line(img, (x - (px(9) if major else px(5)), ypos(p)), (x, ypos(p)), SYM, 1)
+        if major:
+            cv.text((x - px(13), ypos(p)), f"{p}", SYM, 11, "mono", "rm", stroke=1)
+    y = ypos(pitch)
+    _tri(img, [(x + px(3), y), (x + px(11), y - px(5)), (x + px(11), y + px(5))], SYM)
+    cv.text((x + px(15), y), f"{pitch:+.0f}", SYM, 12, "mono", "lm", stroke=1)
+
+
+def _gate(cv: _Canvas, img, t: Track, lock: LockStatus, is_target: bool, auto: bool) -> None:
+    px = cv.px
+    x1, y1, x2, y2 = map(int, t.bbox)
+    if not is_target:
+        _brackets(img, t.bbox, SYM_DIM, 0.18, 1)
+        mark = f"{t.track_id}" + ("?" if t.track_id == lock.candidate_id else "")
+        cv.text((x1, y1 - px(4)), mark, SYM_DIM, 11, "mono", "ld", stroke=1)
+        return
+    pad = px(4)
+    gate = (x1 - pad, y1 - pad, x2 + pad, y2 + pad)
+    if lock.state == LockState.LOST:
+        corners = [(gate[0], gate[1]), (gate[2], gate[1]), (gate[2], gate[3]), (gate[0], gate[3])]
+        for i in range(4):
+            _dashed(img, corners[i], corners[(i + 1) % 4], WARN, 1, px(5), px(5))
+        cv.text((gate[0], gate[1] - px(4)), f"{t.track_id} LOST", WARN, 12, "mono", "ld", stroke=1)
+        return
+    _brackets(img, gate, SYM, 0.3, px(2))
+    if lock.state == LockState.LOCKED:
+        cv2.rectangle(img, (gate[0], gate[1]), (gate[2], gate[3]), SYM, 1, AA)
+        tag = "LOCK"
+        tw = cv.text_width(tag, 12, "mono") + px(8)
+        tx, ty = gate[0], gate[1] - px(19)
+        cv2.rectangle(img, (tx, ty), (tx + tw, ty + px(15)), SYM, -1)
+        cv.text((tx + px(4), ty + px(8)), tag, OUTLINE, 12, "mono", "lm")
+        cv.text((tx + tw + px(5), ty + px(8)), f"{t.track_id}", SYM, 12, "mono", "lm", stroke=1)
+    else:  # acquiring: the gate is set, lock not yet declared
+        cv.text((gate[0], gate[1] - px(4)), f"{t.track_id} ACQ {lock.progress * 100:3.0f}%", SYM, 12, "mono", "ld",
+                stroke=1)
 
 
 # ----------------------------------------------------------------------------- HUD
@@ -304,195 +379,116 @@ def draw_hud(
     link_timeout: float = 3.0,
     panels: bool = True,
 ) -> np.ndarray:
-    """Draw the operator HUD. With `panels=False` only the scene overlay is drawn (boxes,
-    reticle, lock zone, trails); the web console renders the instrument panels itself."""
+    """Draw payload-style video symbology.
+
+    Always: boresight reticle, acquisition window, track gates, and - when vehicle data is
+    available - the sensor azimuth tape and gimbal elevation scale. With `panels=True` the
+    corner data blocks (time, platform, sensor, target) are burned in as well; the web
+    console turns them off because it shows that data in its own panes."""
     cv = _Canvas(frame)
     img, h, w, px = frame, cv.h, cv.w, cv.px
     cx, cy = w // 2, h // 2
-    pad = px(10)
+    pad = px(14)
     lock_on = locker.cfg.enabled
-    state_col = STATE_COLOR[lock.state] if lock_on else GREY
+    link_ok = vehicle is not None and vehicle.connected(link_timeout)
 
-    # ------------------------------------------------------------ layer 1: translucent panels
-    panel_w, panel_h = px(330), px(56)
-    tl = (pad, pad, pad + panel_w, pad + panel_h)
-    tr = (w - pad - panel_w, pad, w - pad, pad + panel_h)
-    box = px(136)
-    er = (w - pad - box, h - pad - box - px(46), w - pad, h - pad)
-    bl = (pad, h - pad - px(30), pad + px(290), h - pad)
-    help_txt = "CLICK / TAB  designate     R  release     SPACE  pause     Q  quit"
-    hw = cv.text_width(help_txt, 11) + px(28)
-    hb = (cx - hw // 2, h - pad - px(26), cx + hw // 2, h - pad)
-    if panels:
-        for rect in (tl, tr, er, bl, hb):
-            cv.panel(rect)
-    vrows: list[tuple[str, str, tuple[int, int, int]]] = []
-    if vehicle is not None and panels:
-        vrows = _vehicle_rows(vehicle, target_geo, gimbal_follow, link_timeout)
-        row_h = px(19)
-        vp = (pad, tl[3] + px(8), pad + px(232), tl[3] + px(8) + px(12) + row_h * len(vrows))
-        cv.panel(vp)
+    # acquisition window (lock zone): small grey corner ticks
     if lock_on:
         zx1, zy1, zx2, zy2 = map(int, locker.zone_px(frame.shape))
-        zl_w = cv.text_width("LOCK ZONE", 10) + px(14)
-        zone_tag = (zx1 + px(6), zy2 - px(24), zx1 + px(6) + zl_w, zy2 - px(6))
-        cv.panel(zone_tag, radius=px(4))
-
-    tag_h = px(20)
-    tags: list[tuple[Track, tuple[int, int, int, int], str, tuple[int, int, int]]] = []
-    for t in tracks:
-        is_target = t.track_id == lock.track_id
-        is_cand = t.track_id == lock.candidate_id and not is_target
-        color = _track_color(t, lock, state_col)
-        label = f"#{t.track_id}  {t.label.upper()}  {t.score:.2f}"
-        if is_cand:
-            label += "  CANDIDATE"
-        x1, y1, _, y2 = map(int, t.bbox)
-        tw = cv.text_width(label, 12, "mono") + px(14)
-        ty = y1 - px(8) - tag_h
-        if ty < (tl[3] if panels else 0) + px(4):  # no room above: put the tag under the box
-            ty = y2 + px(8)
-        tx = int(np.clip(x1, 0, w - tw))
-        rect = (tx, ty, tx + tw, ty + tag_h)
-        cv.panel(rect, radius=px(4))
-        tags.append((t, rect, label, color))
-
-    if draw_trails:  # trails share the translucent layer -> soft, semi-transparent paths
-        for t in tracks:
-            hist = t.history
-            n = len(hist)
-            for i in range(1, n):
-                thick = px(2) if i > n // 2 else 1
-                cv2.line(cv.overlay, hist[i - 1], hist[i], _track_color(t, lock, state_col), thick, AA)
-    cv.flush_overlay()
-
-    # ------------------------------------------------------------ layer 2: geometry
-    if lock_on:
-        zone_frac = min(zx2 - zx1, zy2 - zy1) * 0.07 / max(zx2 - zx1, 1)
-        _brackets(img, (zx1, zy1, zx2, zy2), state_col, zone_frac, px(2))
-        cv.text(((zone_tag[0] + zone_tag[2]) / 2, (zone_tag[1] + zone_tag[3]) / 2), "LOCK ZONE", GREY, 10,
-                "sans", "mm")
+        _brackets(img, (zx1, zy1, zx2, zy2), SYM_DIM, 0.04, 1)
 
     # boresight reticle
-    r1, r2 = px(9), px(30)
+    g, length = px(9), px(28)
     for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-        _line(img, (cx + dx * r1, cy + dy * r1), (cx + dx * r2, cy + dy * r2), WHITE, px(1.5))
-    cv2.circle(img, (cx, cy), px(2), WHITE, -1, AA)
+        _line(img, (cx + dx * g, cy + dy * g), (cx + dx * (g + length), cy + dy * (g + length)), SYM, 1)
+    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):  # end ticks
+        ex, ey = cx + dx * (g + length), cy + dy * (g + length)
+        _line(img, (ex - dy * px(4), ey - dx * px(4)), (ex + dy * px(4), ey + dx * px(4)), SYM, 1)
+    cv2.circle(img, (cx, cy), 1, SYM, -1, AA)
 
-    target_center = None
-    for t, _, _, color in tags:
-        is_target = t.track_id == lock.track_id
-        x1, y1, x2, y2 = map(int, t.bbox)
-        tcx, tcy = (x1 + x2) // 2, (y1 + y2) // 2
+    # track gates
+    auto = not locker.cfg.require_operator_confirm
+    target = None
+    for t in tracks:
+        is_target = t.track_id == lock.track_id and lock_on
         if is_target:
-            target_center = (tcx, tcy)
-            _brackets(img, t.bbox, color, 0.3, px(2.5))
-            if lock.state == LockState.LOCKED:
-                pulse = px(6) + int(px(3) * abs(math.sin(lock.lock_duration * 5.0)))
-                cv2.rectangle(img, (x1 - pulse, y1 - pulse), (x2 + pulse, y2 + pulse), color, 1, AA)
-                for (mx, my) in ((tcx, y1 - pulse), (tcx, y2 + pulse), (x1 - pulse, tcy), (x2 + pulse, tcy)):
-                    cv2.circle(img, (mx, my), px(2.5), color, -1, AA)
-            elif lock.state == LockState.ACQUIRING:
-                r = int(max(x2 - x1, y2 - y1) * 0.5 + px(14))
-                cv2.circle(img, (tcx, tcy), r, DIM, 1, AA)
-                cv2.ellipse(img, (tcx, tcy), (r, r), -90, 0, 360 * lock.progress, AMBER, px(3), AA)
-        else:
-            _brackets(img, t.bbox, color, 0.22, px(1.5))
-        # predicted motion over the next ~0.5 s
-        vx, vy = t.velocity
-        if vx * vx + vy * vy > 0.09:
-            end = (int(tcx + vx * 15), int(tcy + vy * 15))
-            cv2.line(img, (tcx, tcy), end, color, 1, AA)
-            cv2.circle(img, end, px(2.5), color, 1, AA)
+            target = t
+        if draw_trails and is_target and len(t.history) > 2:
+            for p in t.history[:-1:3]:
+                cv2.circle(img, p, 1, SYM_DIM, -1, AA)
+        _gate(cv, img, t, lock, is_target, auto)
 
-    if target_center is not None:
-        _dashed(img, (cx, cy), target_center, state_col, 1, px(8), px(6))
+    # sensor azimuth tape and gimbal elevation scale
+    if link_ok and vehicle.heading_deg is not None:
+        az = (vehicle.heading_deg + (vehicle.gimbal_yaw_deg or 0.0)) % 360.0
+        _heading_tape(cv, img, cx, pad, int(w * 0.36), az)
+    if link_ok and vehicle.gimbal_pitch_deg is not None:
+        _elevation_scale(cv, img, w - px(70), cy, int(h * 0.42), vehicle.gimbal_pitch_deg)
 
-    if not panels:
-        for _, rect, label, color in tags:
-            cv.text((rect[0] + px(7), (rect[1] + rect[3]) / 2), label, color, 12, "mono", "lm")
-        cv.flush_text()
-        return img
-
-    # boresight-error indicator (bottom right)
-    ix1, iy1 = er[0] + px(10), er[1] + px(24)
-    inner = box - px(20)
-    ix2, iy2 = ix1 + inner, iy1 + inner
-    icx, icy = (ix1 + ix2) // 2, (iy1 + iy2) // 2
-    cv2.rectangle(img, (ix1, iy1), (ix2, iy2), DIM, 1, AA)
-    cv2.line(img, (icx, iy1), (icx, iy2), DIM, 1, AA)
-    cv2.line(img, (ix1, icy), (ix2, icy), DIM, 1, AA)
-    cv2.circle(img, (icx, icy), inner // 4, DIM, 1, AA)
-    if lock.error is not None:
-        ex, ey = (float(np.clip(e, -1, 1)) for e in lock.error)
-        dot = (int(icx + ex * inner / 2), int(icy + ey * inner / 2))
-        cv2.line(img, (icx, icy), dot, state_col, 1, AA)
-        cv2.circle(img, dot, px(4), state_col, -1, AA)
-        err_txt = f"X{ex:+.2f}  Y{ey:+.2f}"
-    else:
-        err_txt = "X --    Y --"
-    cv.text(((er[0] + er[2]) / 2, er[1] + px(13)), "BORESIGHT ERROR", GREY, 10, "sans", "mm")
-    cv.text(((er[0] + er[2]) / 2, er[3] - px(13)), err_txt, WHITE, 11, "mono", "mm")
-
-    # ------------------------------------------------------------ solid pills + panel text
-    # status panel (top left)
+    # tracker mode, bottom centre
     if not lock_on:
-        pill_txt, sub = "TRACK ONLY", f"{len(tracks)} ACTIVE TRACKS"
+        mode = "TRACK ONLY"
     else:
-        pill_txt = lock.state.value
-        if lock.state == LockState.LOCKED:
-            sub = f"TGT #{lock.track_id}   LOCK {lock.lock_duration:5.1f} s"
-        elif lock.state == LockState.ACQUIRING:
-            sub = f"TGT #{lock.track_id}   ACQ {lock.progress * 100:3.0f} %"
-        elif lock.state == LockState.LOST:
-            sub = f"TGT #{lock.track_id}   REACQUIRING"
-        elif lock.candidate_id is not None:
-            sub = f"CANDIDATE #{lock.candidate_id}"
-        else:
-            sub = "NO TARGET"
-    pill_w = cv.text_width(pill_txt, 14, "bold") + px(20)
-    pill = (tl[0] + px(10), tl[1] + px(8), tl[0] + px(10) + pill_w, tl[1] + px(31))
-    _rounded_rect(img, *pill, px(5), state_col)
-    cv.text(((pill[0] + pill[2]) / 2, (pill[1] + pill[3]) / 2), pill_txt, PANEL, 14, "bold", "mm")
-    cv.text((pill[2] + px(12), (pill[1] + pill[3]) / 2), sub, WHITE, 14, "mono", "lm")
-    mode = "OPERATOR DESIGNATION" if locker.cfg.require_operator_confirm else "AUTO DESIGNATION"
-    prof = (profile or "default").upper()
-    cv.text((tl[0] + px(11), tl[3] - px(12)), f"PROFILE {prof}   ·   {mode}", GREY, 11, "sans", "lm")
-
-    # telemetry panel (top right)
-    cells = (("FPS", f"{fps:.1f}"), ("LATENCY", f"{latency_ms:.1f} ms"),
-             ("TRACKS", str(len(tracks))), ("DETECTOR", detector_name.upper()))
-    cw = (tr[2] - tr[0]) / len(cells)
-    for i, (k, v) in enumerate(cells):
-        x = tr[0] + cw * i + cw / 2
-        cv.text((x, tr[1] + px(17)), k, GREY, 10, "sans", "mm")
-        cv.text((x, tr[1] + px(38)), v, WHITE, 14, "mono", "mm")
-        if i:
-            xx = int(tr[0] + cw * i)
-            cv2.line(img, (xx, tr[1] + px(12)), (xx, tr[3] - px(12)), (70, 70, 70), 1, AA)
-
-    # vehicle panel (left, under the status panel)
-    for i, (k, v, col) in enumerate(vrows):
-        y = vp[1] + px(6) + row_h * i + row_h / 2
-        cv.text((vp[0] + px(10), y), k, GREY, 10, "sans", "lm")
-        cv.text((vp[0] + px(46), y), v, col, 12, "mono", "lm")
-
-    # footer (bottom left): UTC clock + frame counter
-    stamp = time.strftime("%Y-%m-%d  %H:%M:%S", time.gmtime())
-    foot = f"{stamp} UTC" + (f"   F{frame_idx:06d}" if frame_idx is not None else "")
-    cv.text((bl[0] + px(12), (bl[1] + bl[3]) / 2), foot, GREY, 12, "mono", "lm")
-
-    # track tags
-    for _, rect, label, color in tags:
-        cv.text((rect[0] + px(7), (rect[1] + rect[3]) / 2), label, color, 12, "mono", "lm")
-
-    cv.text((cx, (hb[1] + hb[3]) / 2), help_txt, GREY, 11, "sans", "mm")
-
+        mode = {LockState.SEARCHING: "SEARCH", LockState.ACQUIRING: "ACQUIRE", LockState.LOCKED: "TRACK",
+                LockState.LOST: "COAST"}[lock.state]
+    status = mode + ("  AUTO" if auto and lock_on else "  MAN" if lock_on else "")
     if paused:
-        pw = cv.text_width("PAUSED", 16, "bold") + px(28)
-        pr = (cx - pw // 2, tl[3] + px(12), cx + pw // 2, tl[3] + px(42))
-        _rounded_rect(img, *pr, px(6), AMBER)
-        cv.text((cx, (pr[1] + pr[3]) / 2), "PAUSED", PANEL, 16, "bold", "mm")
+        status = "FREEZE  " + status
+    cv.text((cx, h - pad), status, WARN if lock.state == LockState.LOST else SYM, 15, "mono", "md", stroke=1)
 
+    if panels:
+        _data_blocks(cv, w, h, pad, lock, target, fps, latency_ms, detector_name, frame_idx, vehicle,
+                     target_geo, gimbal_follow, link_ok, profile)
     cv.flush_text()
     return img
+
+
+def _data_blocks(cv: _Canvas, w: int, h: int, pad: int, lock: LockStatus, target: Track | None, fps: float,
+                 latency_ms: float, detector: str, frame_idx: int | None, vehicle, geo, follow: bool,
+                 link_ok: bool, profile: str) -> None:
+    px, size = cv.px, 13
+    lh = px(18)
+
+    def block(lines: list[str], x: float, y: float, anchor: str, upward: bool = False) -> None:
+        rows = list(reversed(lines)) if upward else lines
+        for i, line in enumerate(rows):
+            cv.text((x, y - i * lh if upward else y + i * lh), line, SYM, size, "mono", anchor, stroke=1)
+
+    left = [f"EO  {detector.upper()}  {(profile or 'default').upper()}"]
+    if vehicle is not None:
+        if link_ok:
+            left += [f"{vehicle.mode or '---'}  {'ARMED' if vehicle.armed else 'DISARMED'}"]
+            if vehicle.alt_rel is not None:
+                left += [f"ALT {vehicle.alt_rel:4.0f}M AGL  {vehicle.alt_amsl or 0:4.0f}M MSL"]
+            if vehicle.groundspeed is not None:
+                hdg = f"{vehicle.heading_deg:03.0f}" if vehicle.heading_deg is not None else "---"
+                left += [f"GS {vehicle.groundspeed:4.1f}M/S  HDG {hdg}"]
+        else:
+            left += ["NO LINK"]
+    block(left, pad, pad, "la")
+
+    stamp = time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime())
+    right = [stamp, f"FRM {frame_idx or 0:06d}  {fps:4.1f}FPS", f"PROC {latency_ms:4.1f}MS"]
+    block(right, w - pad, pad, "ra")
+
+    bl: list[str] = []
+    if vehicle is not None and link_ok and vehicle.lat is not None:
+        bl.append(f"AC  {latlon_dms(vehicle.lat, vehicle.lon)}")
+        if vehicle.gimbal_pitch_deg is not None:
+            bl.append(f"GMB AZ{vehicle.gimbal_yaw_deg or 0:+06.1f} EL{vehicle.gimbal_pitch_deg:+05.1f}"
+                      + ("  FOLLOW" if follow else "  HOLD"))
+    if bl:
+        block(bl, pad, h - pad - px(4), "ld", upward=True)
+
+    br: list[str] = []
+    if target is not None:
+        state = {LockState.LOCKED: f"LOCK {lock.lock_duration:4.1f}S", LockState.ACQUIRING: "ACQ",
+                 LockState.LOST: "LOST"}.get(lock.state, "")
+        br.append(f"TGT {target.track_id}  {state}")
+        if geo is not None:
+            br.append(latlon_dms(geo.lat, geo.lon))
+            br.append(f"SLR {geo.slant_range_m:4.0f}M  GR {geo.ground_range_m:4.0f}M  {geo.method.upper()}")
+        elif lock.error is not None:
+            br.append(f"ERR X{lock.error[0]:+.2f} Y{lock.error[1]:+.2f}")
+    if br:
+        block(br, w - pad, h - pad - px(4), "rd", upward=True)

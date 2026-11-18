@@ -234,7 +234,8 @@ class ConsoleSession:
                 self._history.append((time.monotonic(), None if err is None else math.hypot(*err),
                                       res.latency_ms, la, lo))
             vis = draw_hud(frame.copy(), res.tracks, res.lock, self.pipe.locker, res.fps, res.latency_ms,
-                           self.pipe.detector.name, draw_trails=self.cfg.output.draw_trails, panels=False)
+                           self.pipe.detector.name, draw_trails=self.cfg.output.draw_trails, panels=False,
+                           vehicle=vs, link_timeout=self.cfg.mavlink.heartbeat_timeout)
             ok, buf = cv2.imencode(".jpg", vis, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
             self._publish(buf.tobytes() if ok else None)
             idx += 1
@@ -292,6 +293,7 @@ class ConsoleSession:
             "seq": self.seq + 1, "t": round(res.t, 2), "frame": res.index, "fps": round(res.fps, 1),
             "latency_ms": round(res.latency_ms, 2), "paused": self.paused, "ended": self.ended,
             "source": self.source_label, "profile": cfg.profile, "detector": pipe.detector.name, "size": [w, h],
+            "camera_hfov": cfg.camera.hfov_deg,
             "lock": {
                 "enabled": cfg.lock.enabled, "state": lk.state.value, "track_id": lk.track_id,
                 "candidate_id": lk.candidate_id, "designated_id": pipe.locker.designated_id,
@@ -302,7 +304,8 @@ class ConsoleSession:
             "tracks": tracks,
             "vehicle": vehicle,
             "target_geo": None if tg is None else {"lat": round(tg.lat, 7), "lon": round(tg.lon, 7),
-                                                   "range_m": round(tg.ground_range_m, 1), "method": tg.method},
+                                                   "range_m": round(tg.ground_range_m, 1),
+                                                   "slant_m": round(tg.slant_range_m, 1), "method": tg.method},
             "gimbal": {"available": pipe.link is not None, "follow": cfg.mavlink.gimbal.follow,
                        "active": bool(res.extras.get("gimbal_follow")),
                        "cmd": None if cmd is None else [round(v, 2) for v in cmd]},

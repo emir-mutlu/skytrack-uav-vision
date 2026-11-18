@@ -75,7 +75,7 @@ class SimVehicle:
     def _loop(self) -> None:
         mav = self._mav
         t0 = last = time.monotonic()
-        last_hb = 0.0
+        last_hb = last_status = 0.0
         while not self._stop.is_set():
             now = time.monotonic()
             dt, t = now - last, now - t0
@@ -110,6 +110,14 @@ class SimVehicle:
                 int(self.altitude * 1000), int(vn * 100), int(ve * 100), 0,
                 int(math.degrees(yaw) % 360 * 100))
             self.conn.mav.attitude_send(boot_ms, roll, 0.0, yaw, 0.0, 0.0, self.speed / self.radius)
+            if now - last_status >= 0.5:  # battery drains ~3 %/min; healthy 3D fix
+                pct = max(5.0, 100.0 - t / 18.0)
+                self.conn.mav.sys_status_send(0, 0, 0, 250, int((14.8 + 1.6 * pct / 100.0) * 1000), 1450,
+                                              int(pct), 0, 0, 0, 0, 0, 0)
+                self.conn.mav.gps_raw_int_send(int(t * 1e6), 3, int(lat * 1e7), int(lon * 1e7),
+                                               int((amsl0 + self.altitude) * 1000), 70, 110,
+                                               int(self.speed * 100), int(math.degrees(yaw) % 360 * 100), 14)
+                last_status = now
             q = euler_to_quat(0.0, math.radians(self.gimbal_pitch), math.radians(self.gimbal_yaw))
             flags = (mav.GIMBAL_DEVICE_FLAGS_ROLL_LOCK | mav.GIMBAL_DEVICE_FLAGS_PITCH_LOCK
                      | mav.GIMBAL_DEVICE_FLAGS_YAW_IN_VEHICLE_FRAME)
