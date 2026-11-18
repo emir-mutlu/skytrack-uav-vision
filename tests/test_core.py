@@ -1,4 +1,5 @@
 import json
+import math
 
 import numpy as np
 import pytest
@@ -8,7 +9,7 @@ from skytrack.detectors import ClassicTargetDetector
 from skytrack.evaluate import evaluate
 from skytrack.lock import LockState, TargetLock
 from skytrack.pipeline import Pipeline
-from skytrack.synthetic import SyntheticScene
+from skytrack.synthetic import PanningScene, SyntheticScene
 from skytrack.tracking import MultiObjectTracker
 from skytrack.types import Detection, Track, iou, iou_matrix
 
@@ -93,6 +94,38 @@ def test_tracker_separates_two_objects_and_expires():
     for _ in range(4):
         tracks = trk.update([])
     assert tracks == []
+
+
+def test_tracker_holds_box_size_while_coasting():
+    """A target that shrinks under partial occlusion and is then hidden keeps its ID."""
+    trk = MultiObjectTracker(TrackerConfig(min_hits=2, max_age=15))
+    for i in range(10):  # occluder creeping over the target: the detection shrinks
+        s = 60 - 2 * i
+        tracks = trk.update([Detection((200 - s / 2, 200 - s / 2, 200 + s / 2, 200 + s / 2), 0.9)])
+    tid = tracks[0].track_id
+    for _ in range(10):  # fully hidden
+        tracks = trk.update([])
+    assert tracks[0].bbox[2] - tracks[0].bbox[0] > 30  # size held, not collapsed to a point
+    ids = set()
+    for _ in range(3):  # back in full view
+        tracks = trk.update([Detection((170, 170, 230, 230), 0.9)])
+        ids |= {t.track_id for t in tracks}
+    assert ids == {tid} and tracks[0].time_since_update == 0
+
+
+def test_panning_scene_keeps_targets_reachable_and_apart():
+    world = PanningScene(width=640, height=360, seed=7, n_targets=3).world
+    bx0, by0, bx1, by1 = world.target_bounds
+    targets = [m for m in world.movers if m.kind == "target"]
+    closest = math.inf
+    for step in range(3000):
+        world.update()
+        assert all(bx0 <= m.x <= bx1 and by0 <= m.y <= by1 for m in targets)
+        if step >= 100:
+            for i, a in enumerate(targets):
+                for b in targets[i + 1:]:
+                    closest = min(closest, math.hypot(a.x - b.x, a.y - b.y) / (0.72 * (a.size + b.size)))
+    assert closest > 1.0  # the rotated boards never overlap
 
 
 # ---------------------------------------------------------------- lock

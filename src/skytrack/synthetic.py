@@ -229,6 +229,8 @@ class _World:
         self.road_len = [np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(r, axis=0), axis=1))])
                          for r in self.roads]
         self.bounds = bounds
+        self.target_bounds = bounds  # where targets roam; PanningScene narrows it to the gimbal's reach
+        self.separate_targets = False  # ground targets cannot drive through each other
         self.occlusion = occlusion
         self.t = 0
         r = self.rng
@@ -274,7 +276,7 @@ class _World:
             m.angle = math.atan2(hy, hx) + (0.0 if m.speed > 0 else math.pi)
 
     def update(self) -> None:
-        bx0, by0, bx1, by1 = self.bounds
+        bx0, by0, bx1, by1 = self.target_bounds
         for m in self.movers:
             if m.kind == "target":
                 m.x += m.vx
@@ -289,8 +291,25 @@ class _World:
                     m.y = float(np.clip(m.y, by0 + half, by1 - half))
             else:
                 m.s += m.speed
+        if self.separate_targets:
+            self._separate()
         self._place_cars()
         self.t += 1
+
+    def _separate(self) -> None:
+        """Elastic bounce between targets that are about to overlap."""
+        targets = [m for m in self.movers if m.kind == "target"]
+        for i, a in enumerate(targets):
+            for b in targets[i + 1:]:
+                dx, dy = b.x - a.x, b.y - a.y
+                dist = math.hypot(dx, dy) or 1e-6
+                if dist >= 0.8 * (a.size + b.size):
+                    continue
+                nx, ny = dx / dist, dy / dist
+                va, vb = a.vx * nx + a.vy * ny, b.vx * nx + b.vy * ny
+                if va > vb:  # closing: swap the velocity components along the line between them
+                    a.vx, a.vy = a.vx + (vb - va) * nx, a.vy + (vb - va) * ny
+                    b.vx, b.vy = b.vx + (va - vb) * nx, b.vy + (va - vb) * ny
 
     def cloud_center(self) -> tuple[float, float] | None:
         """A cloud drifts across the target area during frames 270-359 of every 360."""
@@ -426,6 +445,12 @@ class PanningScene:
         self.optics = _Optics(width, height, noise, self.rng)
         self.ppd = width / hfov_deg
         self._ref: tuple[float, float] | None = None
+        # Targets roam only where the gimbal can bring them to the image centre. The world is
+        # rendered just `margin` beyond the view, so past that the simulated gimbal sits on an
+        # end stop and the target slides out of the lock zone - a limit of the simulation, not
+        # of the tracker, which the demo should not show as a lost lock.
+        self.world.target_bounds = (width / 2, height / 2, width / 2 + 2 * self.mw, height / 2 + 2 * self.mh)
+        self.world.separate_targets = True
         for m in self.world.movers:  # start every target inside the initial field of view
             if m.kind == "target":
                 m.x = float(self.rng.uniform(self.mw + 0.25 * width, self.mw + 0.75 * width))

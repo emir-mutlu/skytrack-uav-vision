@@ -123,7 +123,12 @@ class MultiObjectTracker:
             t.track.age += 1
             t.track.time_since_update += 1
 
-        matches, _, unmatched_d = associate(predicted, [d.bbox for d in detections], cfg.iou_threshold)
+        matches, unmatched_t, unmatched_d = associate(predicted, [d.bbox for d in detections], cfg.iou_threshold)
+        for ti in unmatched_t:
+            # Coasting: hold the box size. A missed detection says nothing about size, and a
+            # target shrinking under partial occlusion would otherwise collapse to a point and
+            # no longer overlap the detection when it reappears.
+            self._tracklets[ti].kf.x[6:8] = 0.0
 
         for ti, di in matches:
             tl, det = self._tracklets[ti], detections[di]

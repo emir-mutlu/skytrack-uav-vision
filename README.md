@@ -52,7 +52,7 @@ to a GPU or an edge device (Jetson / ONNX / TensorRT) by swapping the detector.
   no latency build-up)
 - **Reproducible benchmark** — procedural aerial scene (forest, roads with traffic, buildings,
   rotating target boards, a drifting cloud) with ground truth: precision / recall / F1 / MOTA /
-  ID switches / latency; **57 pytest tests**, accuracy regression gate in CI
+  ID switches / latency; **60 pytest tests**, accuracy regression gate in CI
 - **Engineering** — installable package, YAML mission profiles, CLI, Docker image, GitHub Actions
   CI, ruff lint
 
@@ -292,8 +292,8 @@ sensor noise, and a cloud that drifts through the view every 12 s to hide target
 | Metric | Value |
 |---|---|
 | Detection precision / recall / F1 | 0.979 / 0.968 / **0.974** |
-| Tracking MOTA | **0.933** |
-| ID switches | 1 |
+| Tracking MOTA | **0.937** |
+| ID switches | 0 |
 | Latency (mean / p95) | **5.6 ms / 6.6 ms** per 960×540 frame |
 
 Reproduce with `skytrack eval --config configs/demo.yaml --frames 600`. The misses come from the
@@ -327,7 +327,7 @@ applicable law, airspace rules and rules of engagement.
 ## Development
 
 ```bash
-pytest -q          # 58 tests incl. console API, HUD, live MAVLink, DEM, closed-loop gimbal follow
+pytest -q          # 60 tests incl. console API, HUD, live MAVLink, DEM, closed-loop gimbal follow
 ruff check src tests scripts
 python scripts/render_media.py   # regenerate README media (assets/*.png, assets/demo.webp)
 python scripts/export_replay.py --out site   # static console replay (pip install imageio-ffmpeg)
