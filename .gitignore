@@ -8,3 +8,4 @@ weights/
 *.pt
 *.onnx
 *.engine
+site/

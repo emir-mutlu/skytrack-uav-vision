@@ -1,12 +1,15 @@
 /* SkyTrack GCS - operator console.
  * State arrives over Server-Sent Events (or polling with ?poll), video as MJPEG
- * (or polled snapshots). Commands go to POST /api/command as JSON. */
+ * (or polled snapshots). Commands go to POST /api/command as JSON.
+ * With <html data-replay> the page instead replays a recorded run (states.json + replay.mp4),
+ * as built by scripts/export_replay.py for static hosting. */
 "use strict";
 (() => {
   const $ = (id) => document.getElementById(id);
   const root = document.documentElement;
   const params = new URLSearchParams(location.search);
   const POLL = params.has("poll");
+  const REPLAY = root.hasAttribute("data-replay");
   const WINDOW_S = 30;
   const M_PER_DEG = 111320;
   const D2R = Math.PI / 180;
@@ -57,7 +60,10 @@
     if (!sticky) toastTimer = setTimeout(() => { t.hidden = true; }, 3500);
   }
   async function send(cmd) {
-    if (S.last && S.last.read_only) { toast("Read-only demo. Run SkyTrack locally to designate targets and steer the gimbal."); return; }
+    if (REPLAY || (S.last && S.last.read_only)) {
+      toast(`${REPLAY ? "Recorded run" : "Read-only demo"}. Run SkyTrack locally to designate targets and steer the gimbal.`);
+      return;
+    }
     try {
       const r = await fetch("/api/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(cmd) });
       const j = await r.json().catch(() => ({}));
@@ -72,7 +78,7 @@
   // MJPEG by default; polled snapshots with ?poll, or when a reverse proxy holds the stream back
   let snap = POLL, snapBusy = false;
   function startVideo() {
-    if (snap) return;
+    if (snap || REPLAY) return;
     video.src = "/stream.mjpg?ts=" + Date.now();
     setTimeout(() => { if (!snap && S.online && !video.naturalWidth) snap = true; }, 8000);
   }
@@ -83,6 +89,7 @@
     video.src = "/api/snapshot.jpg?seq=" + seq;
   }
   video.addEventListener("load", () => { snapBusy = false; $("video-offline").hidden = true; });
+  video.addEventListener("loadeddata", () => { $("video-offline").hidden = true; });  // replay <video>
   video.addEventListener("error", () => {
     snapBusy = false;
     $("video-offline").hidden = false;
@@ -156,7 +163,28 @@
       dirty = true;
     } catch (_) { /* start with empty charts */ }
   }
+  async function replay() {
+    let states;
+    try { states = await (await fetch("states.json")).json(); } catch (_) { toast("The recorded run could not be loaded.", true); return; }
+    if (!states.length) return;
+    const rate = 10;  // states per second of video
+    let last = -1;
+    setOnline(true);
+    video.play().catch(() => { /* autoplay blocked: starts on the first click */ });
+    document.addEventListener("click", () => { if (video.paused) video.play().catch(() => {}); }, { once: true });
+    const step = () => {
+      const i = Math.min(states.length - 1, Math.floor((video.currentTime || 0) * rate));
+      if (i !== last) {
+        if (i < last) { S.err.length = 0; S.trail.length = 0; }  // video looped
+        last = i;
+        ingest(states[i]);
+      }
+      requestAnimationFrame(step);
+    };
+    step();
+  }
   async function connect() {
+    if (REPLAY) return replay();
     await loadHistory();
     if (POLL) {
       const tick = async () => {
@@ -250,7 +278,8 @@
       b.setAttribute("aria-pressed", String((b.dataset.v === "auto") === L.auto));
     }
     const hint = $("pb-hint");
-    hint.textContent = ro ? "Read-only demo, operator controls are off" : "Click a target in the video to designate it";
+    hint.textContent = !ro ? "Click a target in the video to designate it"
+      : REPLAY ? "Recorded simulation run, operator controls are off" : "Read-only demo, operator controls are off";
     hint.hidden = !(ro || (L.enabled && !L.auto && L.designated_id == null && s.tracks.length));
   }
 

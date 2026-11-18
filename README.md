@@ -135,8 +135,9 @@ skytrack console -s rtsp://192.168.1.10:8554/cam -c configs/recon.yaml --mavlink
 skytrack console --host 0.0.0.0 --read-only --no-browser                # watch-only public demo
 ```
 
-`deploy/huggingface/` holds a Dockerfile and Space card that run the simulation console read-only
-on Hugging Face Spaces.
+`scripts/export_replay.py` records a minute of the simulation console and writes a static replay
+of it (console UI, recorded state stream, H.264 video) that needs no server, for a Hugging Face
+Static Space or GitHub Pages; `deploy/huggingface/README.md` is the Space card.
 
 | Area | What it shows |
 |---|---|
@@ -326,6 +327,7 @@ applicable law, airspace rules and rules of engagement.
 pytest -q          # 58 tests incl. console API, HUD, live MAVLink, DEM, closed-loop gimbal follow
 ruff check src tests scripts
 python scripts/render_media.py   # regenerate README media (assets/*.png, assets/demo.webp)
+python scripts/export_replay.py --out site   # static console replay (pip install imageio-ffmpeg)
 docker build -t skytrack . && docker run --rm -v %cd%/runs:/app/runs skytrack
 docker run --rm -p 8080:8080 skytrack console --host 0.0.0.0 --no-browser   # console in Docker
 ```
