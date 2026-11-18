@@ -32,8 +32,9 @@ LOCK_COMMANDS = {"designate", "designate_id", "release", "auto_designation"}
 class ConsoleSession:
     def __init__(self, cfg: Config, frames: Iterator[np.ndarray], src_fps: float = 30.0,
                  live: bool = False, source_label: str = "", jpeg_quality: int = 82,
-                 pipeline: Pipeline | None = None):
+                 pipeline: Pipeline | None = None, read_only: bool = False):
         self.cfg = cfg
+        self.read_only = read_only  # public demo: watch only, operator commands are refused
         self.pipe = pipeline or Pipeline(cfg)
         self.frames = iter(frames)
         self.src_fps = src_fps or 30.0
@@ -293,7 +294,7 @@ class ConsoleSession:
             "seq": self.seq + 1, "t": round(res.t, 2), "frame": res.index, "fps": round(res.fps, 1),
             "latency_ms": round(res.latency_ms, 2), "paused": self.paused, "ended": self.ended,
             "source": self.source_label, "profile": cfg.profile, "detector": pipe.detector.name, "size": [w, h],
-            "camera_hfov": cfg.camera.hfov_deg,
+            "camera_hfov": cfg.camera.hfov_deg, "read_only": self.read_only,
             "lock": {
                 "enabled": cfg.lock.enabled, "state": lk.state.value, "track_id": lk.track_id,
                 "candidate_id": lk.candidate_id, "designated_id": pipe.locker.designated_id,

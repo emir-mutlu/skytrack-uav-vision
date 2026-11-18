@@ -128,6 +128,7 @@ kbd { font: 10px var(--mono); color: var(--text-3); margin-left: 4px; }
 .slot > img, .slot > canvas { display: block; width: 100%; height: 100%; }
 .slot > img { object-fit: contain; }
 #main-slot.is-video { cursor: crosshair; }
+.ro #main-slot.is-video, .ro #tracks-body tr { cursor: default; }
 .video-offline {
   position: absolute;
   inset: 0;

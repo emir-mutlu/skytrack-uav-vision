@@ -211,7 +211,7 @@ def cmd_console(args: argparse.Namespace) -> int:
         live = _is_live(src)
         label = "Synthetic" if src.startswith("synthetic") else ("Live" if live else Path(src).name)
 
-    session = ConsoleSession(cfg, frames, fps, live, label).start()
+    session = ConsoleSession(cfg, frames, fps, live, label, read_only=args.read_only).start()
     try:
         server = ConsoleServer(session, args.host, args.port)
     except OSError as exc:
@@ -221,7 +221,7 @@ def cmd_console(args: argparse.Namespace) -> int:
         print(f"error: cannot listen on {args.host}:{args.port} ({exc}); try --port {args.port + 1}")
         return 1
     print(f"SkyTrack console running at {server.url}  (Ctrl+C to stop)")
-    if args.host not in ("127.0.0.1", "localhost"):
+    if args.host not in ("127.0.0.1", "localhost") and not args.read_only:
         print("warning: the console is reachable from the network; anyone who can open it can steer the gimbal")
     if not args.no_browser:
         webbrowser.open(server.url)
@@ -285,6 +285,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default="127.0.0.1", help="interface to serve on (default: this computer only)")
     p.add_argument("--port", type=int, default=8080)
     p.add_argument("--no-browser", action="store_true", help="do not open a browser window")
+    p.add_argument("--read-only", action="store_true",
+                   help="watch-only console for a public demo: designation and gimbal commands are refused")
     _common(p)
     p.set_defaults(func=cmd_console)
 

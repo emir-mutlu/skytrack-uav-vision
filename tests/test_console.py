@@ -144,3 +144,21 @@ def test_command_validation_and_hardening(console):
     assert _post(port, {"cmd": "release"}, origin="http://evil.example")[0] == 403
     assert _post(port, b"not json")[0] == 400
     assert _post(port, b"[1, 2]")[0] == 400
+
+
+def test_read_only_demo_refuses_commands():
+    cfg = load_config("configs/demo.yaml", {"output": {"show": False}})
+    scene = SyntheticScene(seed=3)
+    session = ConsoleSession(cfg, (f for f, _ in scene.frames(100_000)), 30.0, False, "Synthetic",
+                             read_only=True).start()
+    server = ConsoleServer(session, "127.0.0.1", 0).start_background()
+    port = server.httpd.server_address[1]
+    try:
+        assert _wait(lambda: _state(port).get("read_only") is True, 10)
+        status, data = _post(port, {"cmd": "release"})
+        assert status == 403 and "Read-only" in data["error"]
+        assert _post(port, {"cmd": "pause"})[0] == 403
+        assert _state(port)["paused"] is False
+    finally:
+        server.shutdown()
+        session.stop()

@@ -132,7 +132,11 @@ hardware; point it at a real camera and autopilot the same way as `skytrack run`
 ```bash
 skytrack console                                                    # simulation, opens the browser
 skytrack console -s rtsp://192.168.1.10:8554/cam -c configs/recon.yaml --mavlink udpin:0.0.0.0:14550
+skytrack console --host 0.0.0.0 --read-only --no-browser                # watch-only public demo
 ```
+
+`deploy/huggingface/` holds a Dockerfile and Space card that run the simulation console read-only
+on Hugging Face Spaces.
 
 | Area | What it shows |
 |---|---|
@@ -319,7 +323,7 @@ applicable law, airspace rules and rules of engagement.
 ## Development
 
 ```bash
-pytest -q          # 57 tests incl. console API, HUD, live MAVLink, DEM, closed-loop gimbal follow
+pytest -q          # 58 tests incl. console API, HUD, live MAVLink, DEM, closed-loop gimbal follow
 ruff check src tests scripts
 python scripts/render_media.py   # regenerate README media (assets/*.png, assets/demo.webp)
 docker build -t skytrack . && docker run --rm -v %cd%/runs:/app/runs skytrack

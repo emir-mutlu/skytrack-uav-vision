@@ -57,6 +57,7 @@
     if (!sticky) toastTimer = setTimeout(() => { t.hidden = true; }, 3500);
   }
   async function send(cmd) {
+    if (S.last && S.last.read_only) { toast("Read-only demo. Run SkyTrack locally to designate targets and steer the gimbal."); return; }
     try {
       const r = await fetch("/api/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(cmd) });
       const j = await r.json().catch(() => ({}));
@@ -68,9 +69,25 @@
 
   /* ------------------------------------------------------------------ video / map views */
   const video = $("video"), map = $("map");
-  function startVideo() { if (!POLL) video.src = "/stream.mjpg?ts=" + Date.now(); }
-  video.addEventListener("load", () => { $("video-offline").hidden = true; });
-  video.addEventListener("error", () => { $("video-offline").hidden = false; if (!POLL) setTimeout(startVideo, 1500); });
+  // MJPEG by default; polled snapshots with ?poll, or when a reverse proxy holds the stream back
+  let snap = POLL, snapBusy = false;
+  function startVideo() {
+    if (snap) return;
+    video.src = "/stream.mjpg?ts=" + Date.now();
+    setTimeout(() => { if (!snap && S.online && !video.naturalWidth) snap = true; }, 8000);
+  }
+  function nextSnapshot(seq) {
+    if (!snap || snapBusy || seq == null || seq === S.seq) return;
+    S.seq = seq;
+    snapBusy = true;
+    video.src = "/api/snapshot.jpg?seq=" + seq;
+  }
+  video.addEventListener("load", () => { snapBusy = false; $("video-offline").hidden = true; });
+  video.addEventListener("error", () => {
+    snapBusy = false;
+    $("video-offline").hidden = false;
+    if (!snap) setTimeout(startVideo, 1500);
+  });
 
   function layoutViews() {
     const main = $("main-slot"), pip = $("pip-slot");
@@ -155,7 +172,13 @@
       return;
     }
     const es = new EventSource("/events");
-    es.onmessage = (m) => { setOnline(true); try { ingest(JSON.parse(m.data)); } catch (_) { /* partial */ } };
+    es.onmessage = (m) => {
+      setOnline(true);
+      let s;
+      try { s = JSON.parse(m.data); } catch (_) { return; /* partial */ }
+      nextSnapshot(s.seq);
+      ingest(s);
+    };
     es.onerror = () => setOnline(false);
   }
   function ingest(s) {
@@ -214,16 +237,21 @@
     const pause = $("btn-pause");
     pause.setAttribute("aria-pressed", String(s.paused));
     pause.querySelector(".lbl").textContent = s.paused ? "Unfreeze" : "Freeze";
-    $("btn-release").disabled = !L.enabled;
+    const ro = !!s.read_only;
+    document.body.classList.toggle("ro", ro);
+    $("btn-release").disabled = ro || !L.enabled;
+    pause.disabled = ro;
     for (const b of $("seg-gimbal").querySelectorAll("button")) {
-      b.disabled = !s.gimbal.available;
+      b.disabled = ro || !s.gimbal.available;
       b.setAttribute("aria-pressed", String(s.gimbal.available && (b.dataset.v === "follow") === s.gimbal.follow));
     }
     for (const b of $("seg-acq").querySelectorAll("button")) {
-      b.disabled = !L.enabled;
+      b.disabled = ro || !L.enabled;
       b.setAttribute("aria-pressed", String((b.dataset.v === "auto") === L.auto));
     }
-    $("pb-hint").hidden = !(L.enabled && !L.auto && L.designated_id == null && s.tracks.length);
+    const hint = $("pb-hint");
+    hint.textContent = ro ? "Read-only demo, operator controls are off" : "Click a target in the video to designate it";
+    hint.hidden = !(ro || (L.enabled && !L.auto && L.designated_id == null && s.tracks.length));
   }
 
   function renderTelemetry(s) {

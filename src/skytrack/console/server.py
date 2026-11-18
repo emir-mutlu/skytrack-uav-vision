@@ -8,6 +8,7 @@ Endpoints
     GET  /api/history      last two minutes of trend samples and vehicle track (JSON)
     GET  /api/snapshot.jpg latest annotated frame (JPEG)
     POST /api/command      operator command, e.g. {"cmd": "designate", "x": 0.5, "y": 0.4}
+                           (refused with 403 when the session is read-only, e.g. a public demo)
 
 Security: the server binds to 127.0.0.1 unless told otherwise. Commands must be
 `application/json` POSTs, which a browser only sends cross-origin after a CORS preflight
@@ -78,6 +79,8 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         if urlsplit(self.path).path != "/api/command":
             return self._json(404, {"ok": False, "error": "Not found"})
+        if self.session.read_only:
+            return self._json(403, {"ok": False, "error": "Read-only demo: run SkyTrack locally to control it"})
         content_type = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
         if content_type != "application/json":
             return self._json(415, {"ok": False, "error": "Send commands as application/json"})
