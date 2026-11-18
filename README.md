@@ -3,6 +3,7 @@
 [![CI](https://github.com/emir-mutlu/skytrack-uav-vision/actions/workflows/ci.yml/badge.svg)](https://github.com/emir-mutlu/skytrack-uav-vision/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue)
 ![ArduPilot SITL](https://img.shields.io/badge/tested%20with-ArduPilot%20SITL-orange)
+[![Demo](https://img.shields.io/badge/demo-Hugging%20Face%20Space-yellow)](https://huggingface.co/spaces/emir-mutlu/skytrack-uav-vision)
 
 Real-time perception pipeline for UAV video: **detect → track → lock**, with an operator HUD,
 structured telemetry and a reproducible benchmark. Talks **MAVLink** to ArduPilot / PX4 flight
@@ -124,6 +125,8 @@ skytrack run -s 0 --detector yolo --model yolo11n.pt   # webcam
 ## Operator console
 
 ![SkyTrack GCS console](assets/console.png)
+
+**[Open the demo](https://huggingface.co/spaces/emir-mutlu/skytrack-uav-vision)**: a recorded one-minute run of the console that plays in the browser.
 
 `skytrack console` starts the pipeline and opens a ground-control console in the browser. With the
 default `sim` source it flies the simulated MAVLink vehicle, so every panel is live without
