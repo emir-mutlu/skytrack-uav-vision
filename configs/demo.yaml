@@ -3,6 +3,7 @@ profile: demo
 detector:
   kind: classic
   min_side: 20
+  require_nested: true  # the boards are concentric squares; a lone square roof or panel is not one
 lock:
   zone: [0.2, 0.1, 0.8, 0.9]
   acquire_seconds: 1.0

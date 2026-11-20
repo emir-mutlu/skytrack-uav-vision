@@ -108,10 +108,10 @@ def encode(frames_dir: Path, out: Path, crf: int) -> None:
 
 def build_site(out: Path, states: list[dict], video: Path) -> None:
     out.mkdir(parents=True, exist_ok=True)
-    for name in ("app.js", "app.css"):
+    for name in ("app.js", "app.css", "B612Mono-Regular.ttf", "B612Mono-Bold.ttf", "OFL-B612.txt"):
         shutil.copyfile(STATIC / name, out / name)
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    html = html.replace('data-theme="night">', 'data-theme="night" data-replay>', 1)
+    html = html.replace('<html lang="en">', '<html lang="en" data-replay>', 1)
     html = html.replace('<img id="video" alt="Payload video with tracking symbology">',
                         '<video id="video" src="replay.mp4" muted autoplay loop playsinline '
                         'aria-label="Recorded payload video with tracking symbology"></video>', 1)

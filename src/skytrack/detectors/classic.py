@@ -8,6 +8,9 @@ contours -> polygon approximation -> geometric filters. Improvements over the or
 * morphological closing so broken edges still produce closed contours
 * a continuous confidence score instead of a binary yes/no
 * containment-aware NMS so nested squares produce a single detection
+* optional nested-square check (`require_nested`): a marker board is concentric squares, so a
+  square that holds no concentric square inside it - a square roof, a block of solar panels -
+  is not a target
 
 It needs no GPU and no training data, which makes it useful as a fallback
 on low-power flight computers and as a reference baseline for the deep model.
@@ -30,6 +33,17 @@ def auto_canny(gray: np.ndarray, sigma: float = 0.33) -> np.ndarray:
     if upper - lower < 30:  # flat images: fall back to a sane band
         lower, upper = 30, 120
     return cv2.Canny(gray, lower, upper)
+
+
+def concentric(outer: tuple[float, float, float, float], inner: tuple[float, float, float, float]) -> bool:
+    """True when `inner` is a smaller square sharing `outer`'s centre (a marker's inner ring)."""
+    ox1, oy1, ox2, oy2 = outer
+    ix1, iy1, ix2, iy2 = inner
+    ow, oh = ox2 - ox1, oy2 - oy1
+    ratio = (ix2 - ix1) * (iy2 - iy1) / max(ow * oh, 1e-6)
+    if not 0.08 <= ratio <= 0.85:
+        return False
+    return abs(ix1 + ix2 - ox1 - ox2) / 2 <= 0.2 * ow and abs(iy1 + iy2 - oy1 - oy2) / 2 <= 0.2 * oh
 
 
 def nms_contained(dets: list[Detection], iou_thr: float = 0.5) -> list[Detection]:
@@ -115,4 +129,6 @@ class ClassicTargetDetector(Detector):
             score = float(np.clip(0.4 * solidity + 0.4 * rectangularity + 0.2 * squareness, 0, 1))
             score *= vertex_bonus
             dets.append(Detection((float(x), float(y), float(x + w), float(y + h)), score, 0, "target"))
+        if self.cfg.require_nested:
+            dets = [d for d in dets if any(o is not d and concentric(d.bbox, o.bbox) for o in dets)]
         return nms_contained(dets)

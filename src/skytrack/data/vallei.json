@@ -1,0 +1,36 @@
+{
+  "gsd_m": 0.2,
+  "size": [
+    3285,
+    2346
+  ],
+  "sun_dir": [
+    -0.816,
+    -0.577
+  ],
+  "sun_elev_deg": 32.0,
+  "views": {
+    "fixed": [
+      2250,
+      980
+    ],
+    "panning": [
+      2150,
+      1150
+    ]
+  },
+  "attribution": "Aerial photo: Luchtfoto Actueel Ortho 8 cm RGB, Beeldmateriaal Nederland, via PDOK (open data, CC BY 4.0)",
+  "source": {
+    "service": "PDOK luchtfotorgb WMTS",
+    "layer": "Actueel_orthoHR",
+    "tilematrixset": "EPSG:3857",
+    "zoom": 19,
+    "tiles": [
+      270325,
+      172868,
+      14,
+      10
+    ],
+    "ground_res_m": 0.1833
+  }
+}

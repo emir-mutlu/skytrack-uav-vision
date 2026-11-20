@@ -18,8 +18,8 @@ to a GPU or an edge device (Jetson / ONNX / TensorRT) by swapping the detector.
 ## Features
 
 - **Pluggable detectors** — a lightweight OpenCV shape detector (CLAHE, auto-Canny, rotation-invariant
-  shape test on the minimum-area rectangle, containment NMS, confidence score; no GPU or training
-  data needed) **or** Ultralytics **YOLO11**
+  shape test on the minimum-area rectangle, a nested-square check for marker boards, containment
+  NMS, confidence score; no GPU or training data needed) **or** Ultralytics **YOLO11**
   (COCO / VisDrone / custom drone weights, ONNX / TensorRT export)
 - **Kalman-filter multi-object tracker** — SORT family, Hungarian / greedy IoU association,
   persistent IDs, velocity estimates, coasting through short dropouts
@@ -37,22 +37,26 @@ to a GPU or an edge device (Jetson / ONNX / TensorRT) by swapping the detector.
   telemetry, gimbal rate control, the link diagnostics and the operator console end to end
 - **Hardware bring-up tool** — `skytrack link-check` verifies heartbeat, stream rates, GPS,
   gimbal reporting and gimbal motion with PASS / WARN / FAIL hints before the first flight
-- **Ground-control console** — a browser GCS in the layout of desktop ground-control software:
-  status toolbar (mode, arming, GPS, battery, link), payload video with click-to-designate and a
-  picture-in-picture map, attitude and heading instruments, telemetry, target data, track grid and
-  message log; standard library only (MJPEG + Server-Sent Events + a JSON command API)
+- **Sensor operator station** — a browser GCS laid out like glass-cockpit displays: a sensor
+  MFD with bezel keys and click-to-designate, a PFD (flight modes, attitude, speed and altitude
+  tapes, heading with sensor and target bugs), an HSD (range rings, sensor footprint,
+  MIL-STD-2525 track symbols), target data with **MGRS** grid references, a track file and a
+  caution / message panel, in the B612 cockpit font; standard library only (MJPEG +
+  Server-Sent Events + a JSON command API)
 - **Hardware-free testing** — built-in MAVLink vehicle simulator and a pan/tilt synthetic camera
   that closes the loop detector → lock → gimbal command → camera motion
-- **Operator HUD** — translucent panels with crisp TrueType text, lock-zone brackets, boresight
-  reticle, circular acquisition progress, pulsing lock box, fading trails, motion vectors and a
-  boresight-error indicator; resolution-independent layout from 480p to 4K, ~5–7 ms per 720p frame
-  thanks to cached glyph sprites
+- **Payload video symbology** — monochrome EO/IR-style overlay: boresight reticle, track gates
+  with a `LOCK` tag, azimuth tape, elevation scale and corner data blocks with MGRS positions, in
+  B612 Mono; resolution-independent from 480p to 4K, a few ms per 720p frame thanks to cached
+  glyph sprites
 - **JSONL telemetry** — per-frame tracks and lock state, lock events, run summary
 - **Any video source** — files, webcams, **RTSP / UDP streams** (threaded latest-frame grabber,
   no latency build-up)
-- **Reproducible benchmark** — procedural aerial scene (forest, roads with traffic, buildings,
-  rotating target boards, a drifting cloud) with ground truth: precision / recall / F1 / MOTA /
-  ID switches / latency; **60 pytest tests**, accuracy regression gate in CI
+- **Reproducible benchmark** — real aerial photography as the ground (Dutch national
+  orthophoto, open data, 0.2 m/px: meadows, tree rows, farm buildings, solar panels, parked
+  vehicles) with rotating target boards that cast shadows from the photo's own sun and a drifting
+  cloud, and ground truth: precision / recall / F1 / MOTA / ID switches / latency; a procedural
+  countryside at the same scale as a fallback; **63 pytest tests**, accuracy regression gate in CI
 - **Engineering** — installable package, YAML mission profiles, CLI, Docker image, GitHub Actions
   CI, ruff lint
 
@@ -94,7 +98,8 @@ src/skytrack/
 ├── console/          web operator console: server.py (HTTP, MJPEG, SSE, commands),
 │                     session.py (pipeline thread), static/ (UI)
 ├── sources.py        file / camera / threaded stream capture
-├── synthetic.py      procedural aerial scene with ground truth + pan/tilt camera
+├── synthetic.py      aerial-photo (or procedural) scene with ground truth + pan/tilt camera
+├── data/             vallei.webp / .json: the aerial photo ground (scripts/build_aerial.py)
 ├── evaluate.py       detection + CLEAR-MOT metrics
 └── cli.py            `skytrack run | demo | console | eval | synth | sim-vehicle | link-check`
 ```
@@ -142,20 +147,26 @@ skytrack console --host 0.0.0.0 --read-only --no-browser                # watch-
 of it (console UI, recorded state stream, H.264 video) that needs no server, for a Hugging Face
 Static Space or GitHub Pages; `deploy/huggingface/README.md` is the Space card.
 
-| Area | What it shows |
+The layout follows multi-function cockpit displays: black screens in bezels, legends beside the
+bezel keys (the selected option in inverse video), one stroke-style monospaced face, B612 Mono,
+which Airbus developed for cockpit screens, and flight-deck colour coding (white data, green
+engaged modes, cyan own sensor, magenta the line to the target, amber cautions, red warnings),
+always with a text label or a symbol shape as well.
+
+| Display | What it shows |
 |---|---|
-| Toolbar | Flight mode, arming state, GPS fix and satellites, battery voltage and charge, link status, processing rate, UTC |
-| Video | Payload video with tracker symbology; click a target to designate it. A picture-in-picture map (north up, metric grid, sensor footprint, track symbols, vehicle track) swaps with the video (`M`) |
-| Payload bar | Tracker mode (SEARCH / ACQUIRE / TRACK / COAST), break lock (`R`), freeze (`Space`), gimbal Follow / Hold (`F`), acquisition Auto / Manual (`A`) |
-| Instruments | Attitude indicator; heading indicator with the sensor field of view and the bearing to the target |
-| Telemetry | Altitude AGL / MSL, ground speed, heading, sensor azimuth and elevation, position |
-| Target | Track, tracker status, boresight error, latitude / longitude, ground and slant range, bearing, tracking-error strip chart |
-| Tracks / Messages | Every confirmed track with confidence, age, range and bearing (click to designate); lock, designation and link messages with severity |
+| Status bar | `SIM` / `PLAYBACK` / `VIEW ONLY` annunciators, flight mode, arming, link, GPS fix and satellites, battery, processing rate, UTC, `DAY` / `NGT` brightness |
+| SENS (sensor MFD) | Payload video with tracker symbology; click a target to designate it. Keys: `FRZ` freeze (`Space`), `ACQ` auto / manual acquisition (`A`), `BRK LK` break lock (`R`), `GMB` follow / hold (`F`), `SWAP` (`M`) |
+| PFD | Flight mode annunciator (mode, arming, gimbal, tracker), attitude with pitch ladder and bank scale, ground speed and altitude tapes, AGL and vertical speed, heading scale with the sensor azimuth bug (cyan) and the target bearing bug (magenta) |
+| HSD | Heading-up or north-up situation display: range rings and compass rose, own track, sensor footprint and line of sight, tracks as MIL-STD-2525 frames (unknown quatrefoil, designated target diamond), own and target position. Keys: range up / down, `HDG UP` / `N UP`, `DEP` / `CEN`, `SWAP` |
+| TGT DATA | Track and tracker status, MGRS grid (10 m), latitude / longitude, elevation, slant and ground range, bearing, lock time, line of sight, boresight error |
+| TRACK FILE | Every confirmed track with class, confidence, age, range, bearing and grid; click a row to designate |
+| CAS / MSG | Dark-cockpit annunciators (link, GPS, battery, gimbal, tracker, video) that light only when abnormal, and the message log with severity |
 
 The console is a single page served by the Python standard library: video over MJPEG, state over
 Server-Sent Events at 10 Hz, commands as JSON (`POST /api/command`), and `/api/state`,
 `/api/history` and `/api/snapshot.jpg` for tools and tests. `?poll` switches to plain polling for
-networks that block streaming, and `?theme=day` opens the daylight display.
+networks that block streaming.
 
 It listens on `127.0.0.1` by default. Commands are only accepted as `application/json` with a
 matching origin, so another web page open in the operator's browser cannot designate targets or
@@ -172,7 +183,7 @@ Monochrome symbology in the style of EO/IR gimbal payload video:
 | Centre reticle | Boresight; the gimbal-follow loop keeps the designated target on it |
 | Track gate | Corner brackets on the designated target; `ACQ nn%` while acquiring, a `LOCK` tag once the lock is declared, dashed `LOST` while coasting. Other tracks get small grey brackets and their ID (`?` marks the lock candidate) |
 | Top tape / right scale | Sensor azimuth (vehicle heading + gimbal yaw) and gimbal elevation, from MAVLink |
-| Corner blocks | Sensor and profile, flight mode and arming, altitude and speed (top left); UTC, frame and processing rate (top right); aircraft position and gimbal angles (bottom left); target ID, lock time, position, slant and ground range (bottom right) |
+| Corner blocks | Sensor and profile, flight mode and arming, altitude and speed (top left); UTC, frame and processing rate (top right); aircraft MGRS position and gimbal angles (bottom left); target ID, lock time, MGRS position, slant and ground range (bottom right) |
 | Bottom line | Tracker mode `SEARCH` / `ACQUIRE` / `TRACK` / `COAST`, `AUTO` or `MAN` acquisition, `FREEZE` when paused |
 
 ## Flight-controller integration (MAVLink)
@@ -285,21 +296,28 @@ python scripts/train.py --data VisDrone.yaml --model yolo11n.pt --imgsz 960 --ep
 
 ## Benchmark (synthetic, 600 frames, 1200 GT objects, CPU)
 
-Classic detector + Kalman tracker on the built-in procedural aerial scene: forest canopy, roads,
-buildings and cars driving as distractors, two rotating target boards, camera shake, optics blur,
-sensor noise, and a cloud that drifts through the view every 12 s to hide targets on purpose:
+Classic detector + Kalman tracker on the built-in scene: a real aerial photograph of farmland
+(0.2 m/px) with its tree rows, hedges, lanes, sheep, farm buildings, solar panels and parked
+vehicles as clutter, two rotating target boards casting shadows from the photo's sun, camera
+shake, optics blur, sensor noise, and a cloud that drifts through the view every 12 s to hide
+targets on purpose:
 
 | Metric | Value |
 |---|---|
-| Detection precision / recall / F1 | 0.979 / 0.968 / **0.974** |
-| Tracking MOTA | **0.937** |
-| ID switches | 0 |
-| Latency (mean / p95) | **5.6 ms / 6.6 ms** per 960×540 frame |
+| Detection precision / recall / F1 | 1.000 / 0.948 / **0.974** |
+| Tracking MOTA | **0.975** |
+| ID switches | 2 |
+| Latency (mean / p95) | **5.7 ms / 7.1 ms** per 960×540 frame |
 
-Reproduce with `skytrack eval --config configs/demo.yaml --frames 600`. The misses come from the
-cloud passes; the cloud-free first 300 frames score F1 1.00. The shape test runs on the
-minimum-area rotated rectangle, so the boards are found at any rotation while cars (elongated)
-and tree crowns (round) are rejected at any heading.
+Reproduce with `skytrack eval --config configs/demo.yaml --frames 600`. Of the 60 missed
+boards, 26 fall in the cloud passes, two are half outside the frame and the rest are a board
+crossing the textured edge of a tree line, where its outline runs into the background (the plain
+square test misses most of those too). The shape test runs on the minimum-area rotated rectangle
+and wants a nearly square, solid outline, so boards are found at any rotation while elongated
+roofs, vehicles and tree crowns are rejected at any heading. A real photo also has square things
+that are not targets: here a block of four solar panels and a square shed roof. The nested-square
+check (`require_nested`, on in `demo.yaml`) removes them because a marker board is concentric
+squares; without it precision drops to 0.980 and MOTA to 0.918.
 
 ## Telemetry
 
@@ -327,10 +345,12 @@ applicable law, airspace rules and rules of engagement.
 ## Development
 
 ```bash
-pytest -q          # 60 tests incl. console API, HUD, live MAVLink, DEM, closed-loop gimbal follow
+pytest -q          # 63 tests incl. console API, HUD, live MAVLink, DEM, closed-loop gimbal follow
 ruff check src tests scripts
 python scripts/render_media.py   # regenerate README media (assets/*.png, assets/demo.webp)
 python scripts/export_replay.py --out site   # static console replay (pip install imageio-ffmpeg)
+python scripts/build_aerial.py --lat 52.1294 --lon 5.6229 --sun -0.82 -0.58 --sun-elev 32 \
+    --fixed-view 2250 980 --panning-view 2150 1150 --out src/skytrack/data/vallei   # rebuild the ground
 docker build -t skytrack . && docker run --rm -v %cd%/runs:/app/runs skytrack
 docker run --rm -p 8080:8080 skytrack console --host 0.0.0.0 --no-browser   # console in Docker
 ```
@@ -346,4 +366,7 @@ docker run --rm -p 8080:8080 skytrack console --host 0.0.0.0 --no-browser   # co
 
 ## License
 
-MIT
+MIT. The bundled B612 Mono font is © The B612 Project Authors (Airbus, ENAC, Intactile DESIGN)
+under the SIL Open Font License 1.1, see `src/skytrack/console/static/OFL-B612.txt`. The aerial
+photo the scenes are built on (`src/skytrack/data/vallei.webp`) is Luchtfoto Actueel Ortho 8 cm
+RGB by Beeldmateriaal Nederland, served by PDOK as open data under CC BY 4.0.

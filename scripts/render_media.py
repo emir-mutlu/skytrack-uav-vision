@@ -79,7 +79,7 @@ def _browser() -> str | None:
     return None
 
 
-def render_console(path: Path, seed: int, warmup_s: float = 40.0, theme: str = "night") -> None:
+def render_console(path: Path, seed: int, warmup_s: float = 40.0) -> None:
     """Screenshot of the web operator console (headless Chrome / Edge) after a warm-up, so the
     trend charts and the vehicle track are filled."""
     browser = _browser()
@@ -109,7 +109,7 @@ def render_console(path: Path, seed: int, warmup_s: float = 40.0, theme: str = "
         with tempfile.TemporaryDirectory() as profile:
             subprocess.run([browser, "--headless=new", "--disable-gpu", "--hide-scrollbars",
                             "--window-size=1600,1080", "--virtual-time-budget=4000", f"--user-data-dir={profile}",
-                            f"--screenshot={path.resolve()}", f"{server.url}?poll&theme={theme}"],
+                            f"--screenshot={path.resolve()}", f"{server.url}?poll"],
                            timeout=120, capture_output=True, check=False)
     finally:
         server.shutdown()

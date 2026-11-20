@@ -119,3 +119,61 @@ def geolocate(
     dlat = math.degrees(north / EARTH_RADIUS_M)
     dlon = math.degrees(east / (EARTH_RADIUS_M * math.cos(math.radians(lat))))
     return GeoPoint(lat + dlat, lon + dlon, north, east, ground, float(scale))
+
+
+# ---------------------------------------------------------------- grid references
+_MGRS_BANDS = "CDEFGHJKLMNPQRSTUVWX"
+_MGRS_COLS = ("ABCDEFGH", "JKLMNPQR", "STUVWXYZ")
+_MGRS_ROWS = "ABCDEFGHJKLMNPQRSTUV"
+
+
+def utm(lat: float, lon: float) -> tuple[int, str, float, float]:
+    """WGS-84 latitude / longitude -> (UTM zone, latitude band, easting m, northing m).
+
+    Transverse Mercator series (Snyder), millimetre-level inside a zone; includes the
+    Norway and Svalbard zone exceptions. UTM covers 80 S to 84 N.
+    """
+    if not -80.0 <= lat < 84.0:
+        raise ValueError("UTM / MGRS covers latitudes 80 S to 84 N")
+    lon = (lon + 180.0) % 360.0 - 180.0
+    zone = int((lon + 180.0) // 6) + 1
+    if 56.0 <= lat < 64.0 and 3.0 <= lon < 12.0:
+        zone = 32
+    elif lat >= 72.0 and 0.0 <= lon < 42.0:
+        zone = 31 if lon < 9.0 else 33 if lon < 21.0 else 35 if lon < 33.0 else 37
+    band = _MGRS_BANDS[min(int((lat + 80.0) // 8), 19)]
+
+    a, f, k0 = 6_378_137.0, 1 / 298.257223563, 0.9996
+    e2 = f * (2 - f)
+    ep2 = e2 / (1 - e2)
+    phi = math.radians(lat)
+    n = a / math.sqrt(1 - e2 * math.sin(phi) ** 2)
+    t = math.tan(phi) ** 2
+    c = ep2 * math.cos(phi) ** 2
+    q = math.cos(phi) * math.radians(lon - ((zone - 1) * 6 - 177))
+    m = a * ((1 - e2 / 4 - 3 * e2**2 / 64 - 5 * e2**3 / 256) * phi
+             - (3 * e2 / 8 + 3 * e2**2 / 32 + 45 * e2**3 / 1024) * math.sin(2 * phi)
+             + (15 * e2**2 / 256 + 45 * e2**3 / 1024) * math.sin(4 * phi)
+             - (35 * e2**3 / 3072) * math.sin(6 * phi))
+    easting = 500_000.0 + k0 * n * (q + (1 - t + c) * q**3 / 6
+                                    + (5 - 18 * t + t**2 + 72 * c - 58 * ep2) * q**5 / 120)
+    northing = k0 * (m + n * math.tan(phi) * (q**2 / 2 + (5 - t + 9 * c + 4 * c**2) * q**4 / 24
+                                             + (61 - 58 * t + t**2 + 600 * c - 330 * ep2) * q**6 / 720))
+    if lat < 0:
+        northing += 10_000_000.0
+    return zone, band, easting, northing
+
+
+def mgrs(lat: float, lon: float, digits: int = 4) -> str:
+    """MGRS grid reference such as '55H FA 9233 8561'.
+
+    `digits` per axis: 4 = 10 m (the NATO default), 5 = 1 m. Digits are truncated,
+    never rounded, so the reference always names the square that contains the point.
+    """
+    zone, band, easting, northing = utm(lat, lon)
+    col = _MGRS_COLS[(zone - 1) % 3][int(easting // 100_000) - 1]
+    row = _MGRS_ROWS[(int(northing // 100_000) + (5 if zone % 2 == 0 else 0)) % 20]
+    div = 10 ** (5 - digits)
+    e = int(easting % 100_000) // div
+    nn = int(northing % 100_000) // div
+    return f"{zone}{band} {col}{row} {e:0{digits}d} {nn:0{digits}d}"

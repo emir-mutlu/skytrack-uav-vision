@@ -26,6 +26,7 @@ class DetectorConfig:
     aspect_max: float = 1.2
     min_solidity: float = 0.9
     min_rectangularity: float = 0.8  # contour area / min-area rotated rectangle
+    require_nested: bool = False  # marker boards: keep only squares with a concentric square inside
     clahe: bool = True
 
 

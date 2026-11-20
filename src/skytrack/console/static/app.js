@@ -1,8 +1,9 @@
-/* SkyTrack GCS - operator console.
- * State arrives over Server-Sent Events (or polling with ?poll), video as MJPEG
- * (or polled snapshots). Commands go to POST /api/command as JSON.
- * With <html data-replay> the page instead replays a recorded run (states.json + replay.mp4),
- * as built by scripts/export_replay.py for static hosting. */
+/* SkyTrack GCS - sensor operator station.
+ * Live: state over Server-Sent Events (or polling with ?poll), video as MJPEG (or polled
+ * snapshots), operator commands as JSON to POST /api/command.
+ * <html data-replay>: replays a recorded run (states.json + replay.mp4), as built by
+ * scripts/export_replay.py for static hosting.
+ * Colour follows flight-deck practice and is always paired with text or shape. */
 "use strict";
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -10,58 +11,110 @@
   const params = new URLSearchParams(location.search);
   const POLL = params.has("poll");
   const REPLAY = root.hasAttribute("data-replay");
-  const WINDOW_S = 30;
-  const M_PER_DEG = 111320;
   const D2R = Math.PI / 180;
-  const S = { last: null, err: [], trail: [], online: false, seq: -1, html: {}, swapped: false, hover: null };
+  const M_PER_DEG = 111320;
+  const RANGES = [125, 250, 500, 1000, 2000, 4000];
+  const C = {};
+  const S = {
+    last: null, online: false, seq: -1, swapped: false, trail: [], vs: null, prevAlt: null,
+    rangeIdx: 2, rangeAuto: true, northUp: false, centred: false, html: {}, videoOk: false,
+  };
   let dirty = true;
   let toastTimer = 0;
 
-  const tok = (name) => getComputedStyle(root).getPropertyValue(name).trim();
-  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-  const esc = (v) => String(v).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  const fmt = (v, d = 1) => (v == null || Number.isNaN(v) ? "—" : Number(v).toFixed(d));
-  const sgn = (v, d = 1) => (v == null ? "—" : (v < 0 ? "-" : "+") + Math.abs(v).toFixed(d));
-  const deg3 = (v) => String(Math.round(((v % 360) + 360) % 360) % 360).padStart(3, "0");
-  const setText = (id, text) => { const el = $(id); if (el.textContent !== text) el.textContent = text; };
-  const setHTML = (id, html) => { if (S.html[id] !== html) { S.html[id] = html; $(id).innerHTML = html; } };
-  const setLed = (id, s) => { const el = $(id); if (el.dataset.s !== s) el.dataset.s = s; };
+  /* ------------------------------------------------------------------ helpers */
+  function readColours() {
+    const cs = getComputedStyle(root);
+    for (const k of ["txt", "txt-2", "txt-3", "line", "line-2", "grn", "cyn", "mag", "amb", "red", "yel",
+      "sky", "gnd", "ac", "tape"]) C[k] = cs.getPropertyValue(`--${k}`).trim();
+  }
+  const font = (px, bold) => `${bold ? 700 : 400} ${px}px "B612 Mono", Consolas, monospace`;
+  const pad = (n, w) => String(n).padStart(w, "0");
+  const wrap360 = (d) => ((d % 360) + 360) % 360;
+  const sgn = (x, d) => (x < 0 ? "-" : "+") + Math.abs(x).toFixed(d);
+  const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const rangeLabel = (m) => (m >= 1000 ? `${m / 1000}K` : String(m));
 
-  function dms(value, pos, neg, width) {
-    const v = Math.abs(value), d = Math.floor(v), m = Math.floor((v - d) * 60);
-    const s = (v - d - m / 60) * 3600;
-    return `${String(d).padStart(width, "0")}°${String(m).padStart(2, "0")}'${s.toFixed(2).padStart(5, "0")}"${value >= 0 ? pos : neg}`;
+  function setText(id, text, colour) {
+    const el = $(id);
+    if (el.textContent !== text) el.textContent = text;
+    const c = colour || "";
+    if ((el.dataset.c || "") !== c) {
+      if (c) el.dataset.c = c;
+      else delete el.dataset.c;
+    }
   }
-  const latDms = (v) => dms(v, "N", "S", 2);
-  const lonDms = (v) => dms(v, "E", "W", 3);
-  function bearingRange(lat0, lon0, lat, lon) {
-    const n = (lat - lat0) * M_PER_DEG, e = (lon - lon0) * M_PER_DEG * Math.cos(lat0 * D2R);
-    return [((Math.atan2(e, n) / D2R) + 360) % 360, Math.hypot(n, e)];
+  function dms(v, pos, neg) {
+    if (v == null) return "---";
+    const a = Math.abs(v), d = Math.floor(a), mf = (a - d) * 60, m = Math.floor(mf);
+    return `${v < 0 ? neg : pos}${d}°${pad(m, 2)}'${((mf - m) * 60).toFixed(1).padStart(4, "0")}"`;
+  }
+  function offsetNE(v, lat, lon) {
+    return [(lat - v.lat) * M_PER_DEG, (lon - v.lon) * M_PER_DEG * Math.cos(v.lat * D2R)];
+  }
+  function bearingTo(v, lat, lon) {
+    const [n, e] = offsetNE(v, lat, lon);
+    return wrap360(Math.atan2(e, n) / D2R);
   }
 
-  /* ------------------------------------------------------------------ theme */
-  function setTheme(t) {
-    root.dataset.theme = t;
-    $("theme-toggle").textContent = t === "day" ? "Night" : "Day";
-    try { localStorage.setItem("skytrack-theme", t); } catch (_) { /* storage unavailable */ }
-    dirty = true;
+  /* MGRS grid reference (WGS-84, Transverse Mercator series; same maths as skytrack.geo.mgrs).
+   * digits per axis: 4 = 10 m. Truncated, never rounded. */
+  const MG_BANDS = "CDEFGHJKLMNPQRSTUVWX";
+  const MG_COLS = ["ABCDEFGH", "JKLMNPQR", "STUVWXYZ"];
+  const MG_ROWS = "ABCDEFGHJKLMNPQRSTUV";
+  function utm(lat, lon) {
+    if (!(lat >= -80 && lat < 84)) return null;
+    lon = wrap360(lon + 180) - 180;
+    let zone = Math.floor((lon + 180) / 6) + 1;
+    if (lat >= 56 && lat < 64 && lon >= 3 && lon < 12) zone = 32;
+    else if (lat >= 72 && lon >= 0 && lon < 42) zone = lon < 9 ? 31 : lon < 21 ? 33 : lon < 33 ? 35 : 37;
+    const a = 6378137, f = 1 / 298.257223563, k0 = 0.9996, e2 = f * (2 - f), ep2 = e2 / (1 - e2);
+    const phi = lat * D2R, sp = Math.sin(phi), cp = Math.cos(phi), tp = Math.tan(phi);
+    const n = a / Math.sqrt(1 - e2 * sp * sp), t = tp * tp, c = ep2 * cp * cp;
+    const q = cp * (lon - ((zone - 1) * 6 - 177)) * D2R;
+    const m = a * ((1 - e2 / 4 - 3 * e2 ** 2 / 64 - 5 * e2 ** 3 / 256) * phi
+      - (3 * e2 / 8 + 3 * e2 ** 2 / 32 + 45 * e2 ** 3 / 1024) * Math.sin(2 * phi)
+      + (15 * e2 ** 2 / 256 + 45 * e2 ** 3 / 1024) * Math.sin(4 * phi)
+      - (35 * e2 ** 3 / 3072) * Math.sin(6 * phi));
+    const east = 500000 + k0 * n * (q + (1 - t + c) * q ** 3 / 6 + (5 - 18 * t + t * t + 72 * c - 58 * ep2) * q ** 5 / 120);
+    let north = k0 * (m + n * tp * (q * q / 2 + (5 - t + 9 * c + 4 * c * c) * q ** 4 / 24
+      + (61 - 58 * t + t * t + 600 * c - 330 * ep2) * q ** 6 / 720));
+    if (lat < 0) north += 10000000;
+    return { zone, band: MG_BANDS[Math.min(Math.floor((lat + 80) / 8), 19)], east, north };
   }
-  let saved = null;
-  try { saved = localStorage.getItem("skytrack-theme"); } catch (_) { /* storage unavailable */ }
-  setTheme((params.get("theme") || saved) === "day" ? "day" : "night");
-  $("theme-toggle").addEventListener("click", () => setTheme(root.dataset.theme === "day" ? "night" : "day"));
+  function mgrs(lat, lon, digits = 4) {
+    const u = lat == null || lon == null ? null : utm(lat, lon);
+    if (!u) return "---";
+    const col = MG_COLS[(u.zone - 1) % 3][Math.floor(u.east / 100000) - 1];
+    const row = MG_ROWS[(Math.floor(u.north / 100000) + (u.zone % 2 === 0 ? 5 : 0)) % 20];
+    const div = 10 ** (5 - digits);
+    const e = Math.floor(Math.floor(u.east % 100000) / div), nn = Math.floor(Math.floor(u.north % 100000) / div);
+    return `${u.zone}${u.band} ${col}${row} ${pad(e, digits)} ${pad(nn, digits)}`;
+  }
+
+  /* ------------------------------------------------------------------ brightness */
+  function setBrt(mode) {
+    root.dataset.brt = mode;
+    $("brt").textContent = mode === "ngt" ? "NGT" : "DAY";
+    try { localStorage.setItem("skytrack-brt", mode); } catch (_) { /* storage unavailable */ }
+  }
+  let savedBrt = null;
+  try { savedBrt = localStorage.getItem("skytrack-brt"); } catch (_) { /* storage unavailable */ }
+  setBrt(savedBrt === "ngt" ? "ngt" : "day");
+  $("brt").addEventListener("click", () => setBrt(root.dataset.brt === "ngt" ? "day" : "ngt"));
 
   /* ------------------------------------------------------------------ commands */
-  function toast(msg, sticky = false) {
+  function toast(msg, sticky) {
     const t = $("toast");
     t.textContent = msg;
     t.hidden = false;
     clearTimeout(toastTimer);
     if (!sticky) toastTimer = setTimeout(() => { t.hidden = true; }, 3500);
   }
+  const viewOnly = () => REPLAY || !!(S.last && S.last.read_only);
   async function send(cmd) {
-    if (REPLAY || (S.last && S.last.read_only)) {
-      toast(`${REPLAY ? "Recorded run" : "Read-only demo"}. Run SkyTrack locally to designate targets and steer the gimbal.`);
+    if (viewOnly()) {
+      toast(`${REPLAY ? "Playback" : "View only"} - controls inhibited. Run SkyTrack locally for control`);
       return;
     }
     try {
@@ -69,13 +122,13 @@
       const j = await r.json().catch(() => ({}));
       if (!r.ok || !j.ok) toast(j.error || `Command rejected (HTTP ${r.status})`);
     } catch (_) {
-      toast("SkyTrack is not reachable. Check that `skytrack console` is still running.");
+      toast("SkyTrack not reachable - check that skytrack console is running");
     }
   }
 
-  /* ------------------------------------------------------------------ video / map views */
-  const video = $("video"), map = $("map");
+  /* ------------------------------------------------------------------ video */
   // MJPEG by default; polled snapshots with ?poll, or when a reverse proxy holds the stream back
+  const video = $("video");
   let snap = POLL, snapBusy = false;
   function startVideo() {
     if (snap || REPLAY) return;
@@ -88,47 +141,45 @@
     snapBusy = true;
     video.src = "/api/snapshot.jpg?seq=" + seq;
   }
-  video.addEventListener("load", () => { snapBusy = false; $("video-offline").hidden = true; });
-  video.addEventListener("loadeddata", () => { $("video-offline").hidden = true; });  // replay <video>
+  function videoUp() { snapBusy = false; S.videoOk = true; $("video-offline").hidden = true; }
+  video.addEventListener("load", videoUp);
+  video.addEventListener("loadeddata", videoUp);  // replay <video>
   video.addEventListener("error", () => {
     snapBusy = false;
+    S.videoOk = false;
     $("video-offline").hidden = false;
     if (!snap) setTimeout(startVideo, 1500);
   });
 
-  function layoutViews() {
-    const main = $("main-slot"), pip = $("pip-slot");
-    main.appendChild(S.swapped ? map : video);
-    pip.appendChild(S.swapped ? video : map);
-    main.classList.toggle("is-video", !S.swapped);
-    setText("pip-name", S.swapped ? "Video" : "Map");
-    $("video-offline").style.display = S.swapped ? "none" : "";
+  /* ------------------------------------------------------------------ displays and keys */
+  const pageSens = $("page-sens"), pageHsd = $("page-hsd");
+  function layoutViews() {  // SWAP moves whole pages, legends included, between the two displays
+    $(S.swapped ? "mfd-b" : "mfd-a").appendChild(pageSens);
+    $(S.swapped ? "mfd-a" : "mfd-b").appendChild(pageHsd);
+    if (REPLAY && video.paused) video.play().catch(() => {});
     dirty = true;
   }
-  $("pip-swap").addEventListener("click", (e) => { e.stopPropagation(); S.swapped = !S.swapped; layoutViews(); });
-  layoutViews();
+  function swap() { S.swapped = !S.swapped; layoutViews(); }
 
-  $("main-slot").addEventListener("click", (e) => {
+  $("scr-sens").addEventListener("click", (e) => {
     const s = S.last;
-    if (!s || S.swapped) return;
+    if (!s) return;
     const r = video.getBoundingClientRect();
     const [iw, ih] = s.size;
     const k = Math.min(r.width / iw, r.height / ih), dw = iw * k, dh = ih * k;
     const x = (e.clientX - r.left - (r.width - dw) / 2) / dw, y = (e.clientY - r.top - (r.height - dh) / 2) / dh;
     if (x >= 0 && x <= 1 && y >= 0 && y <= 1) send({ cmd: "designate", x, y });
   });
-
-  /* ------------------------------------------------------------------ controls */
-  $("btn-release").addEventListener("click", () => send({ cmd: "release" }));
-  $("btn-pause").addEventListener("click", () => send({ cmd: "toggle_pause" }));
-  $("seg-gimbal").addEventListener("click", (e) => {
-    const b = e.target.closest("button[data-v]");
-    if (b) send({ cmd: "follow", on: b.dataset.v === "follow" });
-  });
-  $("seg-acq").addEventListener("click", (e) => {
-    const b = e.target.closest("button[data-v]");
-    if (b) send({ cmd: "auto_designation", on: b.dataset.v === "auto" });
-  });
+  $("osb-frz").addEventListener("click", () => send({ cmd: "toggle_pause" }));
+  $("osb-brk").addEventListener("click", () => send({ cmd: "release" }));
+  $("osb-acq").addEventListener("click", () => { if (S.last) send({ cmd: "auto_designation", on: !S.last.lock.auto }); });
+  $("osb-gmb").addEventListener("click", () => { if (S.last) send({ cmd: "follow", on: !S.last.gimbal.follow }); });
+  $("osb-swap-a").addEventListener("click", swap);
+  $("osb-swap-b").addEventListener("click", swap);
+  $("osb-rng-up").addEventListener("click", () => setRange(S.rangeIdx + 1));
+  $("osb-rng-dn").addEventListener("click", () => setRange(S.rangeIdx - 1));
+  $("osb-orient").addEventListener("click", () => { S.northUp = !S.northUp; renderHsdLegends(); dirty = true; });
+  $("osb-dep").addEventListener("click", () => { S.centred = !S.centred; renderHsdLegends(); dirty = true; });
   $("tracks-body").addEventListener("click", (e) => {
     const row = e.target.closest("tr[data-id]");
     if (row) send({ cmd: "designate_id", id: Number(row.dataset.id) });
@@ -141,31 +192,36 @@
     else if (e.code === "Space") { e.preventDefault(); send({ cmd: "toggle_pause" }); }
     else if (k === "f" && s && s.gimbal.available) send({ cmd: "follow", on: !s.gimbal.follow });
     else if (k === "a" && s) send({ cmd: "auto_designation", on: !s.lock.auto });
-    else if (k === "m") { S.swapped = !S.swapped; layoutViews(); }
+    else if (k === "m") swap();
   });
-  const strip = $("sp-err");
-  strip.addEventListener("mousemove", (e) => { S.hover = e.offsetX; dirty = true; });
-  strip.addEventListener("mouseleave", () => { S.hover = null; dirty = true; });
+  function setRange(idx) {
+    S.rangeAuto = false;
+    S.rangeIdx = Math.max(0, Math.min(RANGES.length - 1, idx));
+    renderHsdLegends();
+    dirty = true;
+  }
+  if (typeof ResizeObserver === "function") {
+    const ro = new ResizeObserver(() => { dirty = true; });
+    ro.observe($("pfd"));
+    ro.observe($("map"));
+  }
   addEventListener("resize", () => { dirty = true; });
 
   /* ------------------------------------------------------------------ data */
   function setOnline(on) {
     if (on === S.online) return;
     S.online = on;
-    if (on) { $("toast").hidden = true; startVideo(); } else toast("Connection to SkyTrack lost. Reconnecting…", true);
+    if (on) { $("toast").hidden = true; startVideo(); } else toast("Connection to SkyTrack lost - reconnecting", true);
   }
   async function loadHistory() {
     try {
       const h = await (await fetch("/api/history", { cache: "no-store" })).json();
-      const now = performance.now() / 1000;
-      S.err = h.err.filter((r) => r[0] <= WINDOW_S).map(([age, v]) => [now - age, v]);
-      S.trail = h.trail.map(([age, la, lo]) => [now - age, la, lo]);
-      dirty = true;
-    } catch (_) { /* start with empty charts */ }
+      S.trail = (h.trail || []).map(([, la, lo]) => [la, lo]);
+    } catch (_) { /* start with an empty track */ }
   }
   async function replay() {
     let states;
-    try { states = await (await fetch("states.json")).json(); } catch (_) { toast("The recorded run could not be loaded.", true); return; }
+    try { states = await (await fetch("states.json")).json(); } catch (_) { toast("The recorded run could not be loaded", true); return; }
     if (!states.length) return;
     const rate = 10;  // states per second of video
     let last = -1;
@@ -175,7 +231,7 @@
     const step = () => {
       const i = Math.min(states.length - 1, Math.floor((video.currentTime || 0) * rate));
       if (i !== last) {
-        if (i < last) { S.err.length = 0; S.trail.length = 0; }  // video looped
+        if (i < last) { S.trail.length = 0; S.prevAlt = null; S.vs = null; }  // video looped
         last = i;
         ingest(states[i]);
       }
@@ -191,8 +247,8 @@
         try {
           const s = await (await fetch("/api/state", { cache: "no-store" })).json();
           setOnline(true);
+          nextSnapshot(s.seq);
           ingest(s);
-          if (s.seq != null && s.seq !== S.seq) { S.seq = s.seq; video.src = "/api/snapshot.jpg?seq=" + s.seq; }
         } catch (_) { setOnline(false); }
         setTimeout(tick, 150);
       };
@@ -211,369 +267,598 @@
   }
   function ingest(s) {
     if (!s || !s.lock) return;
-    S.last = s;
-    const now = performance.now() / 1000;
-    const e = s.lock.error;
-    S.err.push([now, e ? Math.hypot(e[0], e[1]) : null]);
-    while (S.err.length && now - S.err[0][0] > WINDOW_S) S.err.shift();
     const v = s.vehicle;
     if (v && v.connected && v.lat != null) {
-      const last = S.trail[S.trail.length - 1];
-      if (!last || now - last[0] > 0.5) S.trail.push([now, v.lat, v.lon]);
-      while (S.trail.length && now - S.trail[0][0] > 180) S.trail.shift();
+      const prev = S.trail[S.trail.length - 1];
+      if (!prev || Math.hypot(...offsetNE(v, prev[0], prev[1])) > 4) S.trail.push([v.lat, v.lon]);
+      if (S.trail.length > 600) S.trail.splice(0, S.trail.length - 600);
+      if (v.alt_rel != null) {
+        if (S.prevAlt && s.t > S.prevAlt[0]) {
+          const raw = (v.alt_rel - S.prevAlt[1]) / (s.t - S.prevAlt[0]);
+          S.vs = S.vs == null ? raw : 0.85 * S.vs + 0.15 * raw;
+        }
+        if (!S.prevAlt || s.t !== S.prevAlt[0]) S.prevAlt = [s.t, v.alt_rel];
+      }
     }
-    renderToolbar(s);
-    renderPayload(s);
-    renderTelemetry(s);
+    S.last = s;
+    renderStatus(s);
+    renderOsb(s);
     renderTarget(s);
     renderTracks(s);
-    renderLog(s);
+    renderCas(s);
     dirty = true;
   }
 
-  /* ------------------------------------------------------------------ panes */
-  const GPS_FIX = { 0: "No GPS", 1: "No fix", 2: "2D", 3: "3D", 4: "DGPS", 5: "RTK float", 6: "RTK fixed" };
-  function renderToolbar(s) {
-    const v = s.vehicle, up = v && v.connected;
-    setText("v-mode", up ? v.mode || "—" : "—");
-    const arm = $("v-arm");
-    setText("v-arm", up ? (v.armed ? "ARMED" : "Disarmed") : "—");
-    arm.dataset.armed = String(!!(up && v.armed));
+  /* ------------------------------------------------------------------ text panes */
+  const GPS_FIX = ["NO GPS", "NO FIX", "2D", "3D", "DGPS", "RTK FLT", "RTK FIX", "STATIC", "PPP"];
+  function renderStatus(s) {
+    const v = s.vehicle, up = !!(v && v.connected);
+    $("a-sim").hidden = !/^(simulation|synthetic)$/i.test(s.source || "");
+    $("a-play").hidden = !REPLAY;
+    $("a-view").hidden = REPLAY || !s.read_only;
+    document.body.classList.toggle("ro", viewOnly());
+    setText("v-mode", v ? (up ? v.mode || "---" : "NO LINK") : "---", v ? (up ? "grn" : "red") : "dim");
+    setText("v-arm", v && up ? (v.armed ? "ARMED" : "DISARMED") : "---", v && up ? "" : "dim");
+    setText("v-link", v ? (up ? "UP" : "LOST") : "OFF", v ? (up ? "grn" : "red") : "dim");
     if (up && v.gps_fix != null) {
-      setText("v-gps", `${GPS_FIX[v.gps_fix] || v.gps_fix}${v.gps_sats != null ? " · " + v.gps_sats + " sat" : ""}`);
-      setLed("led-gps", v.gps_fix >= 3 ? "ok" : v.gps_fix === 2 ? "warn" : "crit");
-    } else { setText("v-gps", "—"); setLed("led-gps", ""); }
+      setText("v-gps", `${GPS_FIX[v.gps_fix] || "?"}${v.gps_sats != null ? " " + v.gps_sats : ""}`, v.gps_fix >= 3 ? "" : "amb");
+    } else setText("v-gps", "---", "dim");
     if (up && v.battery_v != null) {
-      setText("v-bat", `${fmt(v.battery_v, 1)} V${v.battery_pct != null ? " · " + v.battery_pct + "%" : ""}`);
       const p = v.battery_pct;
-      setLed("led-bat", p == null ? "ok" : p > 30 ? "ok" : p > 15 ? "warn" : "crit");
-    } else { setText("v-bat", "—"); setLed("led-bat", ""); }
-    if (up) { setText("v-link", "OK"); setLed("led-link", "ok"); }
-    else if (s.gimbal.available) { setText("v-link", "No heartbeat"); setLed("led-link", "crit"); }
-    else { setText("v-link", "None"); setLed("led-link", ""); }
-    setText("v-src", s.source || "—");
-    setText("v-proc", `${fmt(s.fps, 1)} fps · ${fmt(s.latency_ms, 1)} ms`);
-    setText("video-meta", `EO · ${s.detector} · ${s.size[0]}x${s.size[1]} · F${String(s.frame).padStart(6, "0")}`);
+      setText("v-bat", `${v.battery_v.toFixed(1)}V${p != null ? " " + p + "%" : ""}`, p == null ? "" : p < 15 ? "red" : p < 30 ? "amb" : "");
+    } else setText("v-bat", "---", "dim");
+    setText("v-proc", `${Math.round(s.fps)} FPS ${s.latency_ms.toFixed(1)} MS`);
+    setText("v-clock", `${s.utc || new Date().toISOString().slice(11, 19)}Z`);
   }
 
-  const MODE = { SEARCHING: ["SEARCH", ""], ACQUIRING: ["ACQUIRE", "warn"], LOCKED: ["TRACK", "ok"], LOST: ["COAST", "warn"] };
-  function renderPayload(s) {
-    const L = s.lock;
-    const [label, led] = L.enabled ? MODE[L.state] : ["OFF", ""];
-    setText("trk-state", label + (s.paused ? " · FROZEN" : ""));
-    setLed("led-trk", led);
-    const pause = $("btn-pause");
-    pause.setAttribute("aria-pressed", String(s.paused));
-    pause.querySelector(".lbl").textContent = s.paused ? "Unfreeze" : "Freeze";
-    const ro = !!s.read_only;
-    document.body.classList.toggle("ro", ro);
-    $("btn-release").disabled = ro || !L.enabled;
-    pause.disabled = ro;
-    for (const b of $("seg-gimbal").querySelectorAll("button")) {
-      b.disabled = ro || !s.gimbal.available;
-      b.setAttribute("aria-pressed", String(s.gimbal.available && (b.dataset.v === "follow") === s.gimbal.follow));
-    }
-    for (const b of $("seg-acq").querySelectorAll("button")) {
-      b.disabled = ro || !L.enabled;
-      b.setAttribute("aria-pressed", String((b.dataset.v === "auto") === L.auto));
-    }
-    const hint = $("pb-hint");
-    hint.textContent = !ro ? "Click a target in the video to designate it"
-      : REPLAY ? "Recorded simulation run, operator controls are off" : "Read-only demo, operator controls are off";
-    hint.hidden = !(ro || (L.enabled && !L.auto && L.designated_id == null && s.tracks.length));
+  function renderOsb(s) {
+    const ro = viewOnly(), L = s.lock, G = s.gimbal;
+    const frz = $("osb-frz");
+    frz.setAttribute("aria-pressed", String(!!s.paused));
+    frz.disabled = ro;
+    setText("lg-acq", L.auto ? "AUTO" : "MAN");
+    $("osb-acq").disabled = ro || !L.enabled;
+    $("osb-brk").disabled = ro || !L.enabled;
+    setText("lg-gmb", !G.available ? "---" : G.follow ? "FLW" : "HOLD");
+    $("osb-gmb").disabled = ro || !G.available;
+  }
+  function renderHsdLegends() {
+    setText("lg-rng", rangeLabel(RANGES[S.rangeIdx]));
+    setText("lg-orient", S.northUp ? "N" : "HDG");
+    setText("lg-dep", S.centred ? "CEN" : "DEP");
+    $("osb-rng-up").disabled = S.rangeIdx >= RANGES.length - 1;
+    $("osb-rng-dn").disabled = S.rangeIdx <= 0;
   }
 
-  function renderTelemetry(s) {
-    const v = s.vehicle, up = v && v.connected;
-    setText("tele-meta", !v ? "No link" : up ? "MAVLink" : "No heartbeat");
-    setText("t-agl", up && v.alt_rel != null ? `${fmt(v.alt_rel, 1)} m` : "—");
-    setText("t-msl", up && v.alt_amsl != null ? `${fmt(v.alt_amsl, 0)} m` : "—");
-    setText("t-gs", up && v.groundspeed != null ? `${fmt(v.groundspeed, 1)} m/s` : "—");
-    setText("t-hdg", up && v.heading != null ? `${deg3(v.heading)}°` : "—");
-    const az = up && v.heading != null ? v.heading + (v.gimbal_yaw || 0) : null;
-    setText("t-az", az != null ? `${deg3(az)}°` : "—");
-    setText("t-el", up && v.gimbal_pitch != null ? `${sgn(v.gimbal_pitch, 1)}°` : "—");
-    setText("t-pos", up && v.lat != null ? `${latDms(v.lat)}  ${lonDms(v.lon)}` : "—");
-    setText("inst-meta", up ? `R ${sgn(v.roll, 1)}°  P ${sgn(v.pitch, 1)}°` : "—");
-  }
-
+  const TRK_STATE = { LOCKED: ["TRACK", "grn"], ACQUIRING: ["ACQUIRE", ""], LOST: ["COAST", "amb"], SEARCHING: ["SEARCH", ""] };
   function renderTarget(s) {
-    const L = s.lock, g = s.target_geo, v = s.vehicle;
-    const t = s.tracks.find((x) => x.id === L.track_id);
-    setText("tgt-meta", L.enabled ? (L.auto ? "Auto acquire" : "Manual") : "Lock disabled");
-    setText("g-track", t ? `${t.id} · ${t.label} · ${t.score.toFixed(2)}` : L.candidate_id != null ? `${L.candidate_id} (candidate)` : "—");
-    const st = $("g-status");
-    const status = !L.enabled ? "Disabled" : L.state === "LOCKED" ? `TRACK ${fmt(L.duration, 1)} s`
-      : L.state === "ACQUIRING" ? `ACQUIRE ${Math.round(L.progress * 100)}% of ${fmt(L.acquire_s, 1)} s`
-        : L.state === "LOST" ? "COAST (reacquiring)" : "SEARCH";
-    setText("g-status", status);
-    st.dataset.s = L.state === "LOCKED" ? "lock" : L.state === "ACQUIRING" || L.state === "LOST" ? "acq" : "";
-    setText("g-err", L.error ? `X ${sgn(L.error[0], 3)}  Y ${sgn(L.error[1], 3)}` : "—");
-    setText("g-lat", g ? latDms(g.lat) : "—");
-    setText("g-lon", g ? lonDms(g.lon) : "—");
-    setText("g-rng", g ? `${fmt(g.range_m, 0)} m ground${g.slant_m != null ? " · " + fmt(g.slant_m, 0) + " m slant" : ""}` : "—");
-    if (g && v && v.lat != null) setText("g-brg", `${deg3(bearingRange(v.lat, v.lon, g.lat, g.lon)[0])}° true`);
-    else setText("g-brg", "—");
-    const link = $("g-map");
-    link.hidden = !g;
-    if (g) link.href = `https://www.openstreetmap.org/?mlat=${g.lat}&mlon=${g.lon}#map=18/${g.lat}/${g.lon}`;
+    const L = s.lock, tg = s.target_geo, v = s.vehicle;
+    const tr = (s.tracks || []).find((t) => t.id === L.track_id);
+    setText("g-trk", L.track_id != null ? `${L.track_id}${tr ? " " + tr.label.toUpperCase() : ""}` : "---", L.track_id != null ? "" : "dim");
+    if (!L.enabled) setText("g-stat", "LOCK OFF", "dim");
+    else {
+      const [t, c] = TRK_STATE[L.state] || ["---", "dim"];
+      setText("g-stat", L.state === "ACQUIRING" ? `${t} ${Math.round(L.progress * 100)}%` : t, c);
+    }
+    setText("g-lock", L.state === "LOCKED" ? `${L.duration.toFixed(1)} S` : "---", L.state === "LOCKED" ? "" : "dim");
+    const has = !!tg, dim = has ? "" : "dim";
+    setText("g-grid", has ? mgrs(tg.lat, tg.lon) : "---", dim);
+    setText("g-lat", has ? dms(tg.lat, "N", "S") : "---", dim);
+    setText("g-lon", has ? dms(tg.lon, "E", "W") : "---", dim);
+    setText("g-elev", has && tg.elev_m != null ? `${Math.round(tg.elev_m)} M` : "---", has && tg.elev_m != null ? "" : "dim");
+    setText("g-mthd", has ? tg.method.toUpperCase() : "---", dim);
+    setText("g-slr", has ? `${Math.round(tg.slant_m)} M` : "---", dim);
+    setText("g-gr", has ? `${Math.round(tg.range_m)} M` : "---", dim);
+    const posOk = has && v && v.lat != null;
+    setText("g-brg", posOk ? `${pad(Math.round(bearingTo(v, tg.lat, tg.lon)) % 360, 3)}°T` : "---", posOk ? "" : "dim");
+    const los = v && v.connected && v.gimbal_yaw != null && v.gimbal_pitch != null;
+    setText("g-los", los ? `AZ ${pad(Math.round(wrap360(v.heading + v.gimbal_yaw)) % 360, 3)} EL ${sgn(v.gimbal_pitch, 1)}` : "---", los ? "" : "dim");
+    setText("g-bse", L.error ? `X ${sgn(L.error[0], 3)} Y ${sgn(L.error[1], 3)}` : "---", L.error ? "" : "dim");
   }
 
-  const ROLE = { target: "Target", candidate: "Candidate", track: "Track" };
   function renderTracks(s) {
-    setText("tracks-meta", `${s.tracks.length} active`);
-    const v = s.vehicle;
-    const html = !s.tracks.length
-      ? `<tr class="empty"><td colspan="7">No confirmed tracks. A track is listed after the detector has seen it in three frames.</td></tr>`
-      : s.tracks.map((t) => {
-        const br = t.geo && v && v.lat != null ? deg3(bearingRange(v.lat, v.lon, t.geo.lat, t.geo.lon)[0]) : "—";
-        return `<tr data-id="${t.id}" data-role="${t.role}" title="Designate track ${t.id}">`
-          + `<td>${t.id}</td><td>${esc(t.label)}</td><td class="num">${t.score.toFixed(2)}</td>`
-          + `<td class="num">${fmt(t.age_s, 1)}</td><td class="num">${t.geo ? fmt(t.geo.range_m, 0) : "—"}</td>`
-          + `<td class="num">${br}</td><td class="st-${t.role}">${ROLE[t.role]}</td></tr>`;
-      }).join("");
-    setHTML("tracks-body", html);
+    const v = s.vehicle, rows = s.tracks || [];
+    setText("trk-count", `${rows.length} ACTIVE`);
+    const html = !rows.length ? '<tr class="empty"><td colspan="8">NO TRACKS</td></tr>' : rows.map((t) => {
+      const g = t.geo, posOk = g && v && v.lat != null;
+      const brg = posOk ? pad(Math.round(bearingTo(v, g.lat, g.lon)) % 360, 3) : "---";
+      const grid = g ? mgrs(g.lat, g.lon).split(" ").slice(1).join(" ") : "---";
+      const stat = t.role === "target" ? "TGT" : t.role === "candidate" ? "CAND" : "TRK";
+      return `<tr data-id="${t.id}"${t.role === "target" ? ' class="tgt"' : ""}><td>${t.id}</td><td>${esc(t.label.toUpperCase())}</td>`
+        + `<td class="n">${t.score.toFixed(2)}</td><td class="n">${Math.round(t.age_s)}</td>`
+        + `<td class="n">${g ? Math.round(g.range_m) : "---"}</td><td class="n">${brg}</td><td>${grid}</td><td>${stat}</td></tr>`;
+    }).join("");
+    if (S.html.tracks !== html) { S.html.tracks = html; $("tracks-body").innerHTML = html; }
   }
 
   const MSG = {
-    lock_acquired: ["NOTICE", (e) => `Lock acquired on track ${e.track_id}`],
-    lock_lost: ["WARNING", (e) => `Lock lost on track ${e.track_id}${e.detail ? " after " + e.detail : ""}`],
-    designated: ["INFO", (e) => `Operator designated track ${e.track_id}`],
-    released: ["INFO", (e) => `Lock released${e.track_id != null ? " (track " + e.track_id + ")" : ""}`],
-    no_track: ["INFO", (e) => e.detail || "No track at that position"],
-    link_up: ["INFO", (e) => `Vehicle link up${e.detail ? ", mode " + e.detail : ""}`],
-    link_lost: ["CRITICAL", () => "Vehicle link lost: no heartbeat"],
-    paused: ["INFO", () => "Video frozen"], resumed: ["INFO", () => "Video resumed"],
-    follow_on: ["INFO", () => "Gimbal follow on"], follow_off: ["INFO", () => "Gimbal follow off, gimbal holding"],
-    auto_on: ["INFO", () => "Auto acquisition on"], auto_off: ["INFO", () => "Auto acquisition off, operator designates"],
-    session_start: ["INFO", (e) => `Session started (${e.detail || "video"})`],
-    source_end: ["WARNING", () => "Video source ended"],
+    session_start: (e) => [`SESSION START ${e.detail}`, "sts"],
+    lock_acquired: (e) => [`TRK ${e.track_id} LOCK ACQUIRED`, "adv"],
+    lock_lost: (e) => [`TRK ${e.track_id} LOCK LOST${e.detail ? " AFTER " + e.detail : ""}`, "cau"],
+    designated: (e) => [`TRK ${e.track_id} DESIGNATED`, "adv"],
+    released: (e) => [e.track_id != null ? `TRK ${e.track_id} LOCK RELEASED` : "LOCK RELEASED", "adv"],
+    no_track: (e) => [`DESIGNATION REJECTED - ${e.detail}`, "cau"],
+    paused: () => ["VIDEO FROZEN", "adv"],
+    resumed: () => ["VIDEO LIVE", "adv"],
+    follow_on: () => ["GIMBAL FOLLOW", "adv"],
+    follow_off: () => ["GIMBAL HOLD", "adv"],
+    auto_on: () => ["ACQUISITION AUTO", "adv"],
+    auto_off: () => ["ACQUISITION MANUAL", "adv"],
+    source_end: () => ["VIDEO SOURCE ENDED", "cau"],
+    link_up: (e) => [`FC LINK UP ${e.detail}`, "adv"],
+    link_lost: () => ["FC LINK LOST", "wrn"],
   };
-  function renderLog(s) {
-    setText("msg-meta", `${s.events.length}`);
-    const html = !s.events.length ? `<li class="empty">Lock, designation and link messages appear here.</li>`
-      : s.events.slice().reverse().map((e) => {
-        const [sev, text] = MSG[e.kind] || ["INFO", () => e.kind];
-        return `<li><time>${esc(e.utc)}</time><span class="sev-${sev.toLowerCase()}">${sev}</span><span class="msg">${esc(text(e))}</span></li>`;
-      }).join("");
-    setHTML("log", html);
+  function annunciate(id, text, cls) {
+    const el = $(id);
+    if (el.textContent !== text) el.textContent = text;
+    if (el.className !== cls) el.className = cls;
+  }
+  function renderCas(s) {
+    const v = s.vehicle, up = !!(v && v.connected), L = s.lock, G = s.gimbal;
+    // dark cockpit: normal conditions stay unlit, only abnormal ones light up (with their name)
+    annunciate("c-link", up || !v ? "LINK" : "LINK LOST", !v ? "off" : up ? "" : "wrn");
+    if (!up || v.gps_fix == null) annunciate("c-gps", "GPS", "off");
+    else annunciate("c-gps", v.gps_fix >= 3 ? "GPS" : v.gps_fix === 2 ? "GPS 2D" : "GPS NO FIX", v.gps_fix >= 3 ? "" : "cau");
+    const p = up ? v.battery_pct : null;
+    annunciate("c-batt", p == null ? "BATT" : p < 15 ? "BATT CRIT" : p < 30 ? "BATT LOW" : "BATT", p == null ? "off" : p < 15 ? "wrn" : p < 30 ? "cau" : "");
+    annunciate("c-gmb", G.available && !G.follow ? "GMB HOLD" : "GMB", !G.available ? "off" : G.follow ? "" : "adv");
+    if (!L.enabled) annunciate("c-trk", "TRK OFF", "off");
+    else annunciate("c-trk", { LOCKED: "TRK", ACQUIRING: "TRK ACQ", LOST: "TRK COAST", SEARCHING: "TRK SRCH" }[L.state] || "TRK",
+      { LOCKED: "", ACQUIRING: "adv", LOST: "cau", SEARCHING: "adv" }[L.state] || "");
+    annunciate("c-vid", !S.videoOk ? "NO VIDEO" : s.paused ? "VID FRZ" : "VID", !S.videoOk ? "wrn" : s.paused ? "adv" : "");
+
+    const ev = s.events || [];
+    setText("msg-count", String(ev.length));
+    const html = !ev.length ? '<li class="empty">NO MESSAGES</li>' : ev.slice().reverse().map((e) => {
+      const [text, cls] = (MSG[e.kind] || ((x) => [`${x.kind}${x.track_id != null ? " " + x.track_id : ""}`, "sts"]))(e);
+      return `<li><time>${esc(e.utc)}</time><span class="${cls}">${esc(String(text).toUpperCase())}</span></li>`;
+    }).join("");
+    if (S.html.log !== html) { S.html.log = html; $("log").innerHTML = html; }
   }
 
   /* ------------------------------------------------------------------ canvas helpers */
   function fit(cv) {
-    const r = cv.getBoundingClientRect();
-    const d = window.devicePixelRatio || 1;
-    const W = Math.max(1, Math.round(r.width * d)), H = Math.max(1, Math.round(r.height * d));
-    if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
-    const ctx = cv.getContext("2d");
-    ctx.setTransform(d, 0, 0, d, 0, 0);
-    return { ctx, w: r.width, h: r.height };
+    const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    const w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
+    if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+    const g = cv.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return [g, r.width, r.height];
   }
-  function seg(ctx, x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
-
-  /* Attitude indicator: sky / ground ball, pitch ladder, roll scale, fixed aircraft symbol. */
-  function drawADI() {
-    const { ctx, w, h } = fit($("adi"));
-    ctx.clearRect(0, 0, w, h);
-    const v = S.last && S.last.vehicle, up = v && v.connected;
-    const roll = up ? v.roll || 0 : 0, pitch = up ? v.pitch || 0 : 0;
-    const cx = w / 2, cy = h / 2, R = Math.min(w, h) / 2 - 2, ppd = R / 32;
-    const mono = tok("--mono");
-    ctx.save();
-    ctx.beginPath(); ctx.arc(cx, cy, R, 0, 2 * Math.PI); ctx.clip();
-    ctx.translate(cx, cy); ctx.rotate(-roll * D2R); ctx.translate(0, pitch * ppd);
-    ctx.fillStyle = up ? tok("--sky") : "#3a3d40"; ctx.fillRect(-2 * R, -4 * R, 4 * R, 4 * R);
-    ctx.fillStyle = up ? tok("--ground") : "#2c2e30"; ctx.fillRect(-2 * R, 0, 4 * R, 4 * R);
-    ctx.strokeStyle = "#ffffff"; ctx.fillStyle = "#ffffff"; ctx.lineWidth = 1.5;
-    seg(ctx, -2 * R, 0, 2 * R, 0);
-    ctx.lineWidth = 1; ctx.font = `9px ${mono}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    for (let p = -30; p <= 30; p += 5) {
-      if (!p) continue;
-      const y = -p * ppd, half = p % 10 ? R * 0.1 : R * 0.22;
-      seg(ctx, -half, y, half, y);
-      if (p % 10 === 0) { ctx.fillText(String(Math.abs(p)), -half - 9, y); ctx.fillText(String(Math.abs(p)), half + 9, y); }
-    }
-    ctx.restore();
-
-    ctx.save(); ctx.translate(cx, cy);
-    ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 1.5;
-    const rr = R * 0.84;
-    ctx.beginPath(); ctx.arc(0, 0, rr, -150 * D2R, -30 * D2R); ctx.stroke();
-    for (const a of [-60, -45, -30, -20, -10, 0, 10, 20, 30, 45, 60]) {
-      const t = (a - 90) * D2R, len = a % 30 === 0 ? R * 0.1 : R * 0.06;
-      seg(ctx, Math.cos(t) * rr, Math.sin(t) * rr, Math.cos(t) * (rr - len), Math.sin(t) * (rr - len));
-    }
-    ctx.rotate(-roll * D2R);
-    ctx.fillStyle = "#ffffff";
-    ctx.beginPath(); ctx.moveTo(0, -rr + 2); ctx.lineTo(-5, -rr + 10); ctx.lineTo(5, -rr + 10); ctx.closePath(); ctx.fill();
-    ctx.restore();
-
-    ctx.strokeStyle = "#f2b01e"; ctx.lineWidth = 3; ctx.lineCap = "square";
-    seg(ctx, cx - R * 0.55, cy, cx - R * 0.2, cy); seg(ctx, cx - R * 0.2, cy, cx - R * 0.2, cy + R * 0.08);
-    seg(ctx, cx + R * 0.2, cy, cx + R * 0.55, cy); seg(ctx, cx + R * 0.2, cy, cx + R * 0.2, cy + R * 0.08);
-    ctx.fillStyle = "#f2b01e"; ctx.fillRect(cx - 2, cy - 2, 4, 4);
-    ctx.lineCap = "butt"; ctx.lineWidth = 2; ctx.strokeStyle = tok("--edge");
-    ctx.beginPath(); ctx.arc(cx, cy, R, 0, 2 * Math.PI); ctx.stroke();
-    if (!up) { ctx.fillStyle = "#c8ccd0"; ctx.font = `11px ${tok("--ui")}`; ctx.textAlign = "center"; ctx.fillText("No attitude", cx, cy + R * 0.45); }
+  function line(g, x1, y1, x2, y2) {
+    g.beginPath();
+    g.moveTo(x1, y1);
+    g.lineTo(x2, y2);
+    g.stroke();
+  }
+  function flag(g, x, y, text) {  // invalid-data flag: amber text in an amber box
+    g.font = font(12, true);
+    const w = Math.round(g.measureText(text).width + 12);
+    g.strokeStyle = C.amb;
+    g.lineWidth = 1;
+    g.strokeRect(Math.round(x - w / 2) + 0.5, Math.round(y - 10) + 0.5, w, 19);
+    g.fillStyle = C.amb;
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.fillText(text, x, y);
+    g.textBaseline = "alphabetic";
   }
 
-  /* Heading indicator: rotating compass card, sensor field of view wedge, target bearing bug. */
-  function drawHSI() {
-    const { ctx, w, h } = fit($("hsi"));
-    ctx.clearRect(0, 0, w, h);
-    const s = S.last, v = s && s.vehicle, up = v && v.connected;
-    const hdg = up ? (v.heading != null ? v.heading : v.yaw || 0) : 0;
-    const cx = w / 2, cy = h / 2, R = Math.min(w, h) / 2 - 2, mono = tok("--mono");
-    ctx.fillStyle = "#151719"; ctx.beginPath(); ctx.arc(cx, cy, R, 0, 2 * Math.PI); ctx.fill();
-    ctx.save(); ctx.translate(cx, cy);
-    if (up && v.gimbal_yaw != null) {
-      const half = (s.camera_hfov || 60) / 2, a = (v.gimbal_yaw - 90) * D2R;
-      ctx.fillStyle = "rgba(61, 134, 216, 0.28)"; ctx.strokeStyle = "rgba(110, 170, 235, 0.9)"; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, R * 0.78, a - half * D2R, a + half * D2R); ctx.closePath(); ctx.fill(); ctx.stroke();
-    }
-    ctx.rotate(-hdg * D2R);
-    ctx.strokeStyle = "#e8e8e8"; ctx.fillStyle = "#e8e8e8"; ctx.lineWidth = 1;
-    ctx.font = `10px ${mono}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    for (let d = 0; d < 360; d += 5) {
-      const t = (d - 90) * D2R, len = d % 10 ? R * 0.06 : R * 0.11;
-      seg(ctx, Math.cos(t) * R * 0.97, Math.sin(t) * R * 0.97, Math.cos(t) * (R * 0.97 - len), Math.sin(t) * (R * 0.97 - len));
-      if (d % 30 === 0) {
-        const label = { 0: "N", 90: "E", 180: "S", 270: "W" }[d] || String(d / 10);
-        ctx.save(); ctx.translate(Math.cos(t) * R * 0.74, Math.sin(t) * R * 0.74); ctx.rotate(d * D2R);
-        ctx.font = d % 90 ? `10px ${mono}` : `bold 11px ${mono}`; ctx.fillText(label, 0, 0); ctx.restore();
+  /* ------------------------------------------------------------------ PFD */
+  function fmaCells(s) {
+    const v = s.vehicle, up = !!(v && v.connected), L = s.lock, G = s.gimbal;
+    const trk = !L.enabled ? ["TRK OFF", "txt-3"]
+      : { LOCKED: ["TRACK", "grn"], ACQUIRING: ["ACQ", "txt"], LOST: ["COAST", "amb"], SEARCHING: ["SEARCH", "txt"] }[L.state] || ["---", "txt-3"];
+    return [
+      v ? (up ? [v.mode || "---", "grn"] : ["NO LINK", "red"]) : ["NO FC", "txt-3"],
+      up ? [v.armed ? "ARMED" : "DISARMED", "txt"] : ["---", "txt-3"],
+      G.available ? (G.follow ? ["GMB FLW", "grn"] : ["GMB HOLD", "txt"]) : ["GMB ---", "txt-3"],
+      trk,
+    ];
+  }
+  function drawFMA(g, s, W, h) {  // flight mode annunciator row
+    const cells = fmaCells(s), cw = W / cells.length;
+    g.strokeStyle = C.line;
+    g.lineWidth = 1;
+    line(g, 0, h + 0.5, W, h + 0.5);
+    for (let i = 1; i < cells.length; i++) line(g, Math.round(i * cw) + 0.5, 5, Math.round(i * cw) + 0.5, h - 5);
+    g.font = font(11, true);
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    cells.forEach(([t, c], i) => { g.fillStyle = C[c]; g.fillText(t, i * cw + cw / 2, h / 2 + 1); });
+    g.textBaseline = "alphabetic";
+  }
+  function tape(g, o) {  // vertical scale with a boxed readout pointing at the attitude display
+    const { x, y, w, h, value, step, major, span, side } = o;
+    const ppu = h / span, cy = Math.round(y + h / 2);
+    g.save();
+    g.beginPath();
+    g.rect(x, y, w, h);
+    g.clip();
+    g.fillStyle = C.tape;
+    g.fillRect(x, y, w, h);
+    g.strokeStyle = C.txt;
+    g.fillStyle = C.txt;
+    g.lineWidth = 1;
+    g.font = font(10);
+    g.textBaseline = "middle";
+    for (let u = Math.ceil((value - span / 2 - step) / step) * step; u <= value + span / 2 + step; u += step) {
+      const yy = Math.round(cy - (u - value) * ppu) + 0.5, isMajor = Math.abs(u % major) < 1e-6, len = isMajor ? 8 : 4;
+      if (side === "L") {
+        line(g, x + w - len, yy, x + w, yy);
+        if (isMajor) { g.textAlign = "right"; g.fillText(String(u), x + w - 11, yy); }
+      } else {
+        line(g, x, yy, x + len, yy);
+        if (isMajor) { g.textAlign = "left"; g.fillText(String(u), x + 11, yy); }
       }
     }
-    const g = s && s.target_geo;
-    if (up && g && v.lat != null) {
-      const b = bearingRange(v.lat, v.lon, g.lat, g.lon)[0], t = (b - 90) * D2R, r = R * 0.9;
-      ctx.fillStyle = "#e5484d"; ctx.save(); ctx.translate(Math.cos(t) * r, Math.sin(t) * r); ctx.rotate(b * D2R);
-      ctx.beginPath(); ctx.moveTo(0, -6); ctx.lineTo(5, 0); ctx.lineTo(0, 6); ctx.lineTo(-5, 0); ctx.closePath(); ctx.fill(); ctx.restore();
+    g.restore();
+    const bh = 22, bw = w - 9, bx = side === "L" ? x + 1 : x + 8, t = cy - bh / 2, b = cy + bh / 2;
+    g.beginPath();
+    if (side === "L") {
+      g.moveTo(bx, t); g.lineTo(bx + bw, t); g.lineTo(bx + bw, cy - 5); g.lineTo(bx + bw + 6, cy);
+      g.lineTo(bx + bw, cy + 5); g.lineTo(bx + bw, b); g.lineTo(bx, b);
+    } else {
+      g.moveTo(bx + bw, t); g.lineTo(bx, t); g.lineTo(bx, cy - 5); g.lineTo(bx - 6, cy);
+      g.lineTo(bx, cy + 5); g.lineTo(bx, b); g.lineTo(bx + bw, b);
     }
-    ctx.restore();
-    ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2;
-    seg(ctx, cx, cy - R * 0.22, cx, cy + R * 0.18); seg(ctx, cx - R * 0.18, cy - R * 0.02, cx + R * 0.18, cy - R * 0.02);
-    seg(ctx, cx - R * 0.08, cy + R * 0.16, cx + R * 0.08, cy + R * 0.16);
-    ctx.fillStyle = "#f2b01e"; ctx.beginPath(); ctx.moveTo(cx, cy - R + 1); ctx.lineTo(cx - 6, cy - R - 0 + 10); ctx.lineTo(cx + 6, cy - R + 10); ctx.closePath(); ctx.fill();
-    ctx.fillStyle = "#000000"; ctx.fillRect(cx - 19, cy + R * 0.42 - 9, 38, 18);
-    ctx.strokeStyle = "#e8e8e8"; ctx.lineWidth = 1; ctx.strokeRect(cx - 19, cy + R * 0.42 - 9, 38, 18);
-    ctx.fillStyle = "#ffffff"; ctx.font = `12px ${mono}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillText(up ? deg3(hdg) : "---", cx, cy + R * 0.42 + 1);
-    ctx.lineWidth = 2; ctx.strokeStyle = tok("--edge"); ctx.beginPath(); ctx.arc(cx, cy, R, 0, 2 * Math.PI); ctx.stroke();
+    g.closePath();
+    g.fillStyle = "#000";
+    g.fill();
+    g.strokeStyle = C.txt;
+    g.lineWidth = 1.2;
+    g.stroke();
+    g.fillStyle = C.txt;
+    g.font = font(13, true);
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.fillText(o.fmt(value), bx + bw / 2, cy + 1);
+    g.textBaseline = "alphabetic";
+    g.font = font(10);
+    g.fillStyle = C["txt-2"];
+    g.fillText(o.label, x + w / 2, y - 5);
+    g.fillText(o.unit, x + w / 2, y + h + 13);
   }
-
-  /* Map: north up, metric grid, sensor footprint, track symbols, vehicle and its track. */
-  const GRID = [10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000];
-  function drawMap() {
-    const { ctx, w, h } = fit(map);
-    const s = S.last, v = s && s.vehicle;
-    ctx.fillStyle = tok("--bg"); ctx.fillRect(0, 0, w, h);
-    const small = w < 420, mono = tok("--mono"), fs = small ? 9 : 11;
-    if (!v || !v.connected || v.lat == null) {
-      ctx.fillStyle = tok("--text-3"); ctx.font = `${small ? 11 : 13}px ${tok("--ui")}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillText(s && s.gimbal.available ? "Waiting for vehicle position" : "No vehicle link", w / 2, h / 2);
+  function hdgTape(g, x, y, w, h, hdg, sensAz, tgtBrg) {
+    const cx = Math.round(x + w / 2), span = 50, ppd = w / span;
+    g.save();
+    g.beginPath();
+    g.rect(x, y, w, h);
+    g.clip();
+    g.fillStyle = C.tape;
+    g.fillRect(x, y, w, h);
+    g.strokeStyle = C.txt;
+    g.fillStyle = C.txt;
+    g.lineWidth = 1;
+    g.font = font(10);
+    g.textAlign = "center";
+    for (let d = Math.floor((hdg - span / 2 - 5) / 5) * 5; d <= hdg + span / 2 + 5; d += 5) {
+      const xx = Math.round(x + w / 2 + (d - hdg) * ppd) + 0.5, n = wrap360(d), isMajor = n % 10 === 0;
+      line(g, xx, y + h, xx, y + h - (isMajor ? 8 : 4));
+      if (isMajor && Math.abs(xx - cx) > 36 && xx - 13 > x && xx + 13 < x + w) g.fillText(pad(n, 3), xx, y + h - 11);
+    }
+    const bug = (az, colour, kind) => {  // sensor azimuth (cyan triangle), target bearing (magenta diamond)
+      if (az == null) return;
+      const d = ((az - hdg + 540) % 360) - 180, xx = x + w / 2 + Math.max(-span / 2, Math.min(span / 2, d)) * ppd;
+      g.fillStyle = colour;
+      g.strokeStyle = colour;
+      g.lineWidth = 1.5;
+      g.beginPath();
+      if (kind === "tri") { g.moveTo(xx, y + 9); g.lineTo(xx - 5, y + 1); g.lineTo(xx + 5, y + 1); g.closePath(); g.fill(); } else { g.moveTo(xx, y + 1); g.lineTo(xx + 5, y + 6); g.lineTo(xx, y + 11); g.lineTo(xx - 5, y + 6); g.closePath(); g.stroke(); }
+    };
+    bug(sensAz, C.cyn, "tri");
+    bug(tgtBrg, C.mag, "dia");
+    g.restore();
+    g.fillStyle = "#000";
+    g.fillRect(cx - 20, y - 3, 40, 17);
+    g.strokeStyle = C.txt;
+    g.lineWidth = 1.2;
+    g.strokeRect(cx - 19.5, y - 2.5, 39, 16);
+    line(g, cx + 0.5, y + 13, cx + 0.5, y + h);
+    g.fillStyle = C.txt;
+    g.font = font(12, true);
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.fillText(pad(Math.round(wrap360(hdg)) % 360, 3), cx, y + 6);
+    g.textBaseline = "alphabetic";
+  }
+  function aircraftSymbol(g, cx, cy, aw) {  // fixed reference: black-filled wings outlined in yellow
+    const L = Math.max(24, aw * 0.12), gap = Math.max(14, aw * 0.07);
+    const shapes = [
+      [[-gap - L, -2], [-gap, -2], [-gap, 9], [-gap - 5, 9], [-gap - 5, 3], [-gap - L, 3]],
+      [[gap + L, -2], [gap, -2], [gap, 9], [gap + 5, 9], [gap + 5, 3], [gap + L, 3]],
+      [[-3, -3], [3, -3], [3, 3], [-3, 3]],
+    ];
+    g.save();
+    g.translate(cx, cy);
+    g.lineJoin = "miter";
+    for (const pts of shapes) {
+      g.beginPath();
+      pts.forEach(([px, py], i) => (i ? g.lineTo(px, py) : g.moveTo(px, py)));
+      g.closePath();
+      g.fillStyle = "#000";
+      g.fill();
+      g.strokeStyle = C.ac;
+      g.lineWidth = 2;
+      g.stroke();
+    }
+    g.restore();
+  }
+  function drawPFD(s) {
+    const [g, W, H] = fit($("pfd"));
+    g.fillStyle = "#000";
+    g.fillRect(0, 0, W, H);
+    if (W < 160 || H < 150) return;
+    const v = s.vehicle, up = !!(v && v.connected && v.roll != null);
+    const fmaH = 24, hdgH = 30, tw = Math.round(Math.max(50, Math.min(70, W * 0.15)));
+    const ax = tw + 12, aw = W - 2 * tw - 24, ay = fmaH + 18, ah = H - fmaH - hdgH - 48;
+    const cx = Math.round(ax + aw / 2), cy = Math.round(ay + ah / 2);
+    drawFMA(g, s, W, fmaH);
+    if (!up) {
+      g.strokeStyle = C.line;
+      g.lineWidth = 1;
+      g.strokeRect(ax + 0.5, ay + 0.5, aw, ah);
+      flag(g, cx, cy, "ATT");
+      flag(g, 4 + tw / 2, cy, "SPD");
+      flag(g, W - 4 - tw / 2, cy, "ALT");
+      flag(g, cx, H - hdgH / 2 - 4, "HDG");
       return;
     }
-    const k = Math.cos(v.lat * D2R);
-    const ne = (lat, lon) => [(lat - v.lat) * M_PER_DEG, (lon - v.lon) * M_PER_DEG * k];
-    let ext = 0;
-    for (const t of s.tracks) if (t.geo) ext = Math.max(ext, t.geo.range_m * 1.3);
-    if (!ext && s.footprint) {
-      const d = s.footprint.filter(Boolean).map((p) => Math.hypot(p[0], p[1]));
-      if (d.length) ext = Math.min(...d) * 1.6;
-    }
-    ext = Math.max(ext, 60);
-    const sc = (Math.min(w, h) / 2 - 14) / ext;
-    const cx = w / 2, cy = h / 2;
-    const P = (n, e) => [cx + e * sc, cy - n * sc];
-    const step = GRID.find((g) => g * sc >= (small ? 34 : 48)) || 5000;
-    ctx.strokeStyle = tok("--grid"); ctx.lineWidth = 1;
-    const e0 = Math.floor((-cx / sc) / step) * step, n0 = Math.floor((-(h - cy) / sc) / step) * step;
-    for (let e = e0; e * sc + cx <= w; e += step) { const x = Math.round(cx + e * sc) + 0.5; seg(ctx, x, 0, x, h); }
-    for (let n = n0; cy - n * sc >= 0; n += step) { const y = Math.round(cy - n * sc) + 0.5; seg(ctx, 0, y, w, y); }
-
-    if (S.trail.length > 1) {
-      ctx.strokeStyle = tok("--text-3"); ctx.lineWidth = 1; ctx.beginPath();
-      S.trail.forEach(([, la, lo], i) => { const [x, y] = P(...ne(la, lo)); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
-      ctx.stroke();
-    }
-    if (s.footprint && s.footprint.every(Boolean)) {
-      ctx.beginPath();
-      s.footprint.forEach(([n, e], i) => { const [x, y] = P(n, e); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
-      ctx.closePath(); ctx.fillStyle = "rgba(61, 134, 216, 0.16)"; ctx.fill();
-      ctx.strokeStyle = tok("--accent"); ctx.lineWidth = 1; ctx.stroke();
-    }
-    const tgt = s.tracks.find((t) => t.role === "target" && t.geo);
-    if (tgt) {
-      const [x, y] = P(...ne(tgt.geo.lat, tgt.geo.lon));
-      ctx.strokeStyle = tok("--text-2"); ctx.setLineDash([4, 3]); seg(ctx, cx, cy, x, y); ctx.setLineDash([]);
-    }
-    ctx.font = `${fs}px ${mono}`; ctx.textAlign = "left"; ctx.textBaseline = "middle";
-    for (const t of s.tracks) {
-      if (!t.geo) continue;
-      const [x, y] = P(...ne(t.geo.lat, t.geo.lon));
-      if (t.role === "target") {
-        ctx.fillStyle = tok("--crit"); ctx.strokeStyle = "#000000"; ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.moveTo(x, y - 7); ctx.lineTo(x + 7, y); ctx.lineTo(x, y + 7); ctx.lineTo(x - 7, y); ctx.closePath(); ctx.fill(); ctx.stroke();
-      } else {  // unknown track: quatrefoil frame
-        ctx.fillStyle = tok("--track");
-        for (const [dx, dy] of [[-2.6, 0], [2.6, 0], [0, -2.6], [0, 2.6]]) { ctx.beginPath(); ctx.arc(x + dx, y + dy, 3.2, 0, 2 * Math.PI); ctx.fill(); }
+    // attitude: sky and ground move with pitch and roll behind the fixed aircraft symbol
+    const ppd = ah / 40;
+    g.save();
+    g.beginPath();
+    g.rect(ax, ay, aw, ah);
+    g.clip();
+    g.translate(cx, cy);
+    g.rotate(-v.roll * D2R);
+    g.translate(0, (v.pitch || 0) * ppd);
+    const big = (aw + ah) * 2;
+    g.fillStyle = C.sky;
+    g.fillRect(-big, -big, 2 * big, big);
+    g.fillStyle = C.gnd;
+    g.fillRect(-big, 0, 2 * big, big);
+    g.strokeStyle = C.txt;
+    g.lineWidth = 1.5;
+    line(g, -big, 0, big, 0);
+    g.lineWidth = 1;
+    g.fillStyle = C.txt;
+    g.font = font(10);
+    g.textBaseline = "middle";
+    for (let p = -40; p <= 40; p += 2.5) {
+      if (p === 0) continue;
+      const y = -p * ppd, isMajor = p % 10 === 0, mid = p % 5 === 0;
+      const half = aw * (isMajor ? 0.13 : mid ? 0.075 : 0.035);
+      line(g, -half, y, half, y);
+      if (isMajor) {
+        g.textAlign = "right"; g.fillText(String(Math.abs(p)), -half - 4, y);
+        g.textAlign = "left"; g.fillText(String(Math.abs(p)), half + 4, y);
       }
-      ctx.fillStyle = tok("--text");
-      ctx.fillText(t.role === "target" ? `${t.id} ${Math.round(t.geo.range_m)}m` : `${t.id}`, x + 9, y - 7);
     }
-    const hd = (v.heading != null ? v.heading : v.yaw || 0) * D2R;
-    ctx.save(); ctx.translate(cx, cy); ctx.rotate(hd);
-    ctx.beginPath(); ctx.moveTo(0, -10); ctx.lineTo(7, 8); ctx.lineTo(0, 4); ctx.lineTo(-7, 8); ctx.closePath();
-    ctx.fillStyle = "#e5484d"; ctx.fill(); ctx.strokeStyle = "#000000"; ctx.lineWidth = 1; ctx.stroke();
-    ctx.restore();
-    // scale bar and north arrow
-    const bar = step * sc, bx = 8, by = h - 10;
-    ctx.strokeStyle = tok("--text"); ctx.lineWidth = 2; seg(ctx, bx, by, bx + bar, by);
-    ctx.lineWidth = 1; seg(ctx, bx, by - 4, bx, by + 2); seg(ctx, bx + bar, by - 4, bx + bar, by + 2);
-    ctx.fillStyle = tok("--text"); ctx.textBaseline = "bottom"; ctx.fillText(`${step} m`, bx + 2, by - 4);
-    ctx.textAlign = "center"; ctx.font = `bold ${fs + 1}px ${mono}`; ctx.fillText("N", w - 14, 22);
-    ctx.beginPath(); ctx.moveTo(w - 14, 24); ctx.lineTo(w - 18, 34); ctx.lineTo(w - 10, 34); ctx.closePath(); ctx.fill();
+    g.textBaseline = "alphabetic";
+    g.restore();
+    // bank scale fixed to the display, sky pointer turning with the horizon
+    const rr = Math.min(aw, ah) * 0.44;
+    g.save();
+    g.translate(cx, cy);
+    g.strokeStyle = C.txt;
+    g.fillStyle = C.txt;
+    g.lineWidth = 1.5;
+    g.beginPath();
+    g.arc(0, 0, rr, (-90 - 60) * D2R, (-90 + 60) * D2R);
+    g.stroke();
+    for (const a of [-60, -45, -30, -20, -10, 10, 20, 30, 45, 60]) {
+      const len = Math.abs(a) % 30 === 0 ? 10 : 6, sa = Math.sin(a * D2R), ca = -Math.cos(a * D2R);
+      line(g, sa * rr, ca * rr, sa * (rr + len), ca * (rr + len));
+    }
+    g.beginPath();
+    g.moveTo(0, -rr - 1); g.lineTo(-6, -rr - 11); g.lineTo(6, -rr - 11);
+    g.closePath();
+    g.stroke();
+    g.rotate(-v.roll * D2R);
+    g.beginPath();
+    g.moveTo(0, -rr + 1); g.lineTo(-6, -rr + 11); g.lineTo(6, -rr + 11);
+    g.closePath();
+    g.fill();
+    g.restore();
+    aircraftSymbol(g, cx, cy, aw);
+    // speed and altitude tapes
+    tape(g, { x: 4, y: ay, w: tw, h: ah, value: v.groundspeed ?? 0, step: 1, major: 5, span: 16, side: "L", label: "GS", unit: "M/S", fmt: (x) => x.toFixed(1) });
+    tape(g, { x: W - tw - 4, y: ay, w: tw, h: ah, value: v.alt_amsl ?? v.alt_rel ?? 0, step: 2, major: 10, span: 60, side: "R", label: "ALT", unit: "M MSL", fmt: (x) => String(Math.round(x)) });
+    g.font = font(10);
+    g.textAlign = "center";
+    g.fillStyle = C.txt;
+    const rx = W - 4 - tw / 2;
+    g.fillText(`AGL ${v.alt_rel != null ? Math.round(v.alt_rel) : "---"}`, rx, ay + ah + 27);
+    g.fillText(`VS ${S.vs != null ? sgn(S.vs, 1) : "---"}`, rx, ay + ah + 39);
+    // heading scale with the sensor line-of-sight and target bearing bugs
+    const az = v.gimbal_yaw != null ? wrap360(v.heading + v.gimbal_yaw) : null;
+    const tg = s.target_geo, brg = tg && v.lat != null ? bearingTo(v, tg.lat, tg.lon) : null;
+    hdgTape(g, ax, H - hdgH - 6, aw, hdgH, v.heading ?? 0, az, brg);
+    g.font = font(10);
+    g.textAlign = "left";
+    g.fillStyle = C.cyn;
+    g.fillText(az != null ? `SENS ${pad(Math.round(az) % 360, 3)}` : "", 4, H - 18);
+    g.fillStyle = C.mag;
+    g.fillText(brg != null ? `TGT  ${pad(Math.round(brg) % 360, 3)}` : "", 4, H - 6);
   }
 
-  /* Tracking error strip chart: one series, recessive grid, hover readout. */
-  function drawStrip() {
-    const { ctx, w, h } = fit(strip);
-    ctx.fillStyle = tok("--bg"); ctx.fillRect(0, 0, w, h);
-    const now = performance.now() / 1000, L = 28, T = 4, B = 4, R = 4, pw = w - L - R, ph = h - T - B;
-    const vmax = Math.max(0.2, ...S.err.filter((p) => p[1] != null).map((p) => p[1])) > 0.5 ? 1 : 0.5;
-    const X = (t) => L + pw * (1 - (now - t) / WINDOW_S), Y = (v) => T + ph * (1 - Math.min(v, vmax) / vmax);
-    const mono = tok("--mono");
-    ctx.strokeStyle = tok("--grid"); ctx.lineWidth = 1; ctx.font = `9px ${mono}`; ctx.fillStyle = tok("--text-3");
-    ctx.textAlign = "right"; ctx.textBaseline = "middle";
-    for (const f of [0, 0.5, 1]) { const y = Math.round(T + ph * (1 - f)) + 0.5; seg(ctx, L, y, w - R, y); ctx.fillText((vmax * f).toFixed(2), L - 4, y); }
-    for (let k = 1; k < 6; k++) { const x = Math.round(L + pw * k / 6) + 0.5; seg(ctx, x, T, x, T + ph); }
-    ctx.strokeStyle = tok("--accent"); ctx.lineWidth = 1.5; ctx.beginPath();
-    let pen = false;
-    for (const [t, v] of S.err) {
-      if (v == null) { pen = false; continue; }
-      const x = X(t), y = Y(v);
-      if (pen) ctx.lineTo(x, y); else { ctx.moveTo(x, y); pen = true; }
+  /* ------------------------------------------------------------------ HSD */
+  function hostile(g, x, y, r) {  // MIL-STD-2525 hostile frame: diamond
+    g.beginPath();
+    g.moveTo(x, y - r); g.lineTo(x + r, y); g.lineTo(x, y + r); g.lineTo(x - r, y);
+    g.closePath();
+    g.fillStyle = "#000";
+    g.fill();
+    g.strokeStyle = C.red;
+    g.lineWidth = 1.6;
+    g.stroke();
+  }
+  function unknown(g, x, y, r) {  // MIL-STD-2525 unknown frame: quatrefoil
+    const q = r * 0.55;
+    g.beginPath();
+    g.arc(x, y - q, q, Math.PI, 2 * Math.PI);
+    g.arc(x + q, y, q, 1.5 * Math.PI, 2.5 * Math.PI);
+    g.arc(x, y + q, q, 0, Math.PI);
+    g.arc(x - q, y, q, 0.5 * Math.PI, 1.5 * Math.PI);
+    g.closePath();
+    g.fillStyle = "#000";
+    g.fill();
+    g.strokeStyle = C.yel;
+    g.lineWidth = 1.6;
+    g.stroke();
+  }
+  function ownship(g, x, y, ang) {
+    g.save();
+    g.translate(x, y);
+    g.rotate(ang);
+    g.strokeStyle = C.cyn;
+    g.lineWidth = 2;
+    g.lineCap = "square";
+    line(g, 0, -10, 0, 10);
+    line(g, -9, -2, 9, -2);
+    line(g, -4, 8, 4, 8);
+    g.restore();
+  }
+  function drawHSD(s) {
+    const [g, W, H] = fit($("map"));
+    g.fillStyle = "#000";
+    g.fillRect(0, 0, W, H);
+    if (W < 100 || H < 100) return;
+    const v = s.vehicle;
+    if (!v || !v.connected || v.lat == null) { flag(g, W / 2, H / 2, v ? "NO NAV" : "NO FC"); return; }
+    if (S.rangeAuto) {  // smallest scale that holds every geolocated track, until the operator picks one
+      let far = 0;
+      for (const t of s.tracks || []) if (t.geo) far = Math.max(far, t.geo.range_m);
+      let idx = RANGES.findIndex((r) => r >= far * 1.25);
+      if (idx < 0) idx = RANGES.length - 1;
+      if (idx !== S.rangeIdx) { S.rangeIdx = idx; renderHsdLegends(); }
     }
-    ctx.stroke();
-    if (S.hover != null && S.err.length && S.hover >= L) {
-      const tt = now - (1 - (S.hover - L) / pw) * WINDOW_S;
-      let best = S.err[0];
-      for (const p of S.err) if (Math.abs(p[0] - tt) < Math.abs(best[0] - tt)) best = p;
-      ctx.strokeStyle = tok("--text-3"); ctx.setLineDash([2, 2]); seg(ctx, S.hover + 0.5, T, S.hover + 0.5, T + ph); ctx.setLineDash([]);
-      const label = `${best[1] != null ? best[1].toFixed(3) : "no target"}  ${(now - best[0]).toFixed(1)} s ago`;
-      ctx.font = `10px ${mono}`;
-      const tw = ctx.measureText(label).width + 8, bx = clamp(S.hover + 6, L, w - R - tw);
-      ctx.fillStyle = tok("--pane-2"); ctx.fillRect(bx, T, tw, 14); ctx.strokeStyle = tok("--line"); ctx.strokeRect(bx, T, tw, 14);
-      ctx.fillStyle = tok("--text"); ctx.textAlign = "left"; ctx.fillText(label, bx + 4, T + 7.5);
+    const hdg = v.heading ?? 0, rot = S.northUp ? 0 : -hdg * D2R;
+    const ox = Math.round(W / 2), oy = Math.round(S.centred ? H / 2 + 8 : H * 0.7);
+    const Rpx = Math.max(40, S.centred ? Math.min(W, H) / 2 - 30 : Math.min(W / 2 - 12, oy - 34));
+    const R = RANGES[S.rangeIdx], k = Rpx / R, cr = Math.cos(rot), sr = Math.sin(rot);
+    const xy = (n, e) => { const x = e * k, y = -n * k; return [ox + x * cr - y * sr, oy + x * sr + y * cr]; };
+    const ll = (lat, lon) => { const [n, e] = offsetNE(v, lat, lon); return xy(n, e); };
+
+    // range rings and compass rose
+    g.lineWidth = 1;
+    g.strokeStyle = C.line;
+    g.setLineDash([3, 4]);
+    g.beginPath();
+    g.arc(ox, oy, Rpx / 2, 0, 2 * Math.PI);
+    g.stroke();
+    g.setLineDash([]);
+    g.strokeStyle = C["line-2"];
+    g.beginPath();
+    g.arc(ox, oy, Rpx, 0, 2 * Math.PI);
+    g.stroke();
+    g.font = font(10);
+    g.textBaseline = "middle";
+    for (let d = 0; d < 360; d += 5) {
+      const a = d * D2R + rot, sx = Math.sin(a), sy = -Math.cos(a), len = d % 30 === 0 ? 9 : d % 10 === 0 ? 6 : 3;
+      g.strokeStyle = d % 10 === 0 ? C["txt-2"] : C["line-2"];
+      line(g, ox + sx * Rpx, oy + sy * Rpx, ox + sx * (Rpx - len), oy + sy * (Rpx - len));
+      if (d % 30 === 0) {
+        g.fillStyle = d % 90 === 0 ? C.txt : C["txt-2"];
+        g.textAlign = "center";
+        g.fillText({ 0: "N", 90: "E", 180: "S", 270: "W" }[d] || String(d / 10), ox + sx * (Rpx - 19), oy + sy * (Rpx - 19));
+      }
     }
+    g.fillStyle = C["txt-2"];
+    g.textAlign = "left";
+    g.fillText(rangeLabel(R / 2), ox + Rpx * 0.36 + 4, oy - Rpx * 0.36 - 4);
+
+    // own track, sensor footprint and line of sight (own sensor: cyan)
+    g.fillStyle = C["txt-3"];
+    for (const [la, lo] of S.trail) { const [x, y] = ll(la, lo); g.fillRect(x - 1, y - 1, 2, 2); }
+    const fp = s.footprint;
+    if (fp && fp.length === 4) {
+      g.strokeStyle = C.cyn;
+      g.lineWidth = 1.2;
+      g.beginPath();
+      let pen = false;
+      for (let i = 0; i <= 4; i++) {
+        const c = fp[i % 4];
+        if (!c) { pen = false; continue; }
+        const [x, y] = xy(c[0], c[1]);
+        if (pen) g.lineTo(x, y); else { g.moveTo(x, y); pen = true; }
+      }
+      g.stroke();
+      if (fp.every(Boolean)) {
+        const [x, y] = xy(fp.reduce((a, c) => a + c[0], 0) / 4, fp.reduce((a, c) => a + c[1], 0) / 4);
+        g.setLineDash([3, 3]);
+        line(g, ox, oy, x, y);
+        g.setLineDash([]);
+      }
+    }
+    // tracks: unknown = yellow quatrefoil, designated target = red diamond on a magenta line of sight
+    const tg = s.target_geo;
+    if (tg) {
+      const [x, y] = ll(tg.lat, tg.lon);
+      g.strokeStyle = C.mag;
+      g.lineWidth = 1.2;
+      line(g, ox, oy, x, y);
+    }
+    g.font = font(10);
+    g.textBaseline = "middle";
+    g.textAlign = "left";
+    for (const t of s.tracks || []) {
+      if (!t.geo) continue;
+      const [x, y] = ll(t.geo.lat, t.geo.lon);
+      if (t.role === "target") hostile(g, x, y, 8); else unknown(g, x, y, 8);
+      g.fillStyle = t.role === "target" ? C.txt : C["txt-2"];
+      g.fillText(t.role === "target" ? `TGT ${t.id}` : String(t.id), x + 11, y);
+    }
+    ownship(g, ox, oy, S.northUp ? hdg * D2R : 0);
+    // heading readout and lubber mark at the top of the rose
+    const hy = Math.max(10, oy - Rpx - 14);
+    if (!S.northUp) {
+      g.fillStyle = C.txt;
+      g.beginPath();
+      g.moveTo(ox, oy - Rpx + 1); g.lineTo(ox - 5, oy - Rpx - 7); g.lineTo(ox + 5, oy - Rpx - 7);
+      g.closePath();
+      g.fill();
+    }
+    g.fillStyle = "#000";
+    g.fillRect(ox - 20, hy - 9, 40, 17);
+    g.strokeStyle = C.txt;
+    g.lineWidth = 1.2;
+    g.strokeRect(ox - 19.5, hy - 8.5, 39, 16);
+    g.fillStyle = C.txt;
+    g.font = font(12, true);
+    g.textAlign = "center";
+    g.fillText(pad(Math.round(wrap360(hdg)) % 360, 3), ox, hy);
+    // corner data, on a black ground so the rose never runs through it
+    g.textBaseline = "alphabetic";
+    g.font = font(10);
+    const corner = (text, colour, right, bottom) => {
+      const tw = g.measureText(text).width, x = right ? W - 6 - tw : 6, y = bottom ? H - 6 : 14;
+      g.fillStyle = "#000";
+      g.fillRect(x - 3, y - 11, tw + 6, 15);
+      g.fillStyle = colour;
+      g.textAlign = "left";
+      g.fillText(text, x, y);
+    };
+    corner(S.northUp ? "N UP" : "HDG UP", C["txt-2"], false, false);
+    corner(`${rangeLabel(R)} M`, C["txt-2"], true, false);
+    corner(`OWN ${mgrs(v.lat, v.lon)}`, C["txt-2"], false, true);
+    if (tg) corner(`TGT ${pad(Math.round(bearingTo(v, tg.lat, tg.lon)) % 360, 3)}°/${Math.round(tg.range_m)}M`, C.mag, true, true);
   }
 
-  /* ------------------------------------------------------------------ loop */
+  /* ------------------------------------------------------------------ main loop */
   function frame() {
-    if (dirty) { dirty = false; drawADI(); drawHSI(); drawMap(); drawStrip(); }
+    if (dirty && S.last) {
+      dirty = false;
+      drawPFD(S.last);
+      drawHSD(S.last);
+    }
     requestAnimationFrame(frame);
   }
-  setInterval(() => { setText("v-clock", new Date().toISOString().slice(11, 19) + "Z"); }, 1000);
-  connect();
+  readColours();
+  layoutViews();
+  renderHsdLegends();
+  if (document.fonts && document.fonts.load) document.fonts.load('11px "B612 Mono"').then(() => { dirty = true; }).catch(() => {});
   requestAnimationFrame(frame);
+  connect();
 })();

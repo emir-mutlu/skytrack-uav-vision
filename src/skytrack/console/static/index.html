@@ -1,130 +1,134 @@
 <!doctype html>
-<html lang="en" data-theme="night">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark light">
 <title>SkyTrack GCS</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<header class="toolbar">
-  <div class="tb-app">
-    <svg class="logo" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M6 6l12 12M18 6L6 18"/><rect x="9.5" y="9.5" width="5" height="5"/>
-      <circle cx="5" cy="5" r="3"/><circle cx="19" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/>
-    </svg>
-    <span>SkyTrack GCS</span>
-  </div>
-  <div class="tb-item"><span class="tb-k">Mode</span><span class="tb-v" id="v-mode">—</span></div>
-  <div class="tb-item"><span class="tb-v" id="v-arm">—</span></div>
-  <div class="tb-item"><i class="led" id="led-gps"></i><span class="tb-k">GPS</span><span class="tb-v" id="v-gps">—</span></div>
-  <div class="tb-item"><i class="led" id="led-bat"></i><span class="tb-k">Battery</span><span class="tb-v" id="v-bat">—</span></div>
-  <div class="tb-item"><i class="led" id="led-link"></i><span class="tb-k">Link</span><span class="tb-v" id="v-link">—</span></div>
-  <div class="tb-spacer"></div>
-  <div class="tb-item tb-quiet"><span class="tb-k">Video</span><span class="tb-v" id="v-src">—</span></div>
-  <div class="tb-item tb-quiet"><span class="tb-k">Proc</span><span class="tb-v" id="v-proc">—</span></div>
-  <div class="tb-item"><span class="tb-v" id="v-clock">--:--:--Z</span></div>
-  <button class="tb-btn" id="theme-toggle" type="button">Day</button>
-</header>
+<div class="station">
 
-<main class="workspace">
-  <section class="pane pane-video" aria-label="Video">
-    <div class="pane-title"><span>Video</span><span class="pane-meta" id="video-meta">EO</span></div>
-    <div class="view" id="main-view">
-      <div class="slot" id="main-slot">
-        <img id="video" alt="Payload video with tracking symbology">
+  <header class="sb" aria-label="System status">
+    <span class="sb-name">SKYTRACK GCS</span>
+    <span class="sb-ann">
+      <span class="ann ann-sim" id="a-sim" hidden>SIM</span>
+      <span class="ann ann-sim" id="a-play" hidden>PLAYBACK</span>
+      <span class="ann" id="a-view" hidden>VIEW ONLY</span>
+    </span>
+    <span class="sb-gap"></span>
+    <span class="sb-f"><i>MODE</i><b id="v-mode">---</b></span>
+    <span class="sb-f"><b id="v-arm">---</b></span>
+    <span class="sb-f"><i>LINK</i><b id="v-link">---</b></span>
+    <span class="sb-f"><i>GPS</i><b id="v-gps">---</b></span>
+    <span class="sb-f"><i>BATT</i><b id="v-bat">---</b></span>
+    <span class="sb-f sb-proc"><i>PROC</i><b id="v-proc">---</b></span>
+    <span class="sb-f"><i>UTC</i><b id="v-clock">--:--:--</b></span>
+    <button class="sb-brt" id="brt" type="button" title="Display brightness">DAY</button>
+  </header>
+
+  <main class="deck">
+    <section class="mfd" id="mfd-a" aria-label="Main display">
+      <div class="page" id="page-sens">
+        <div class="osb osb-t">
+          <span class="lg lg-box">EO</span><span></span><span></span><span></span>
+          <button class="lg" id="osb-frz" type="button" aria-pressed="false" title="Freeze the video (Space)">FRZ</button>
+        </div>
+        <div class="osb osb-l">
+          <button class="lg" id="osb-acq" type="button" title="Target acquisition: automatic, or by operator designation (A)"><small>ACQ</small><span id="lg-acq">AUTO</span></button>
+          <span></span>
+          <button class="lg" id="osb-brk" type="button" title="Break the lock (R)">BRK<br>LK</button>
+          <span></span><span></span>
+        </div>
+        <div class="screen" id="scr-sens">
+          <img id="video" alt="Payload video with tracking symbology">
+          <div class="no-video" id="video-offline">NO VIDEO</div>
+        </div>
+        <div class="osb osb-r">
+          <button class="lg" id="osb-gmb" type="button" title="Gimbal: follow the locked target, or hold (F)"><small>GMB</small><span id="lg-gmb">FLW</span></button>
+          <span></span><span></span><span></span><span></span>
+        </div>
+        <div class="osb osb-b">
+          <button class="lg" id="osb-swap-a" type="button" title="Swap the displays (M)">SWAP</button>
+          <span></span>
+          <span class="lg lg-box">SENS</span>
+          <span></span><span></span>
+        </div>
       </div>
-      <div class="video-offline" id="video-offline">No video</div>
-      <div class="pip" id="pip">
-        <div class="pip-title"><span id="pip-name">Map</span><button class="pip-btn" id="pip-swap" type="button">Swap</button></div>
-        <div class="slot" id="pip-slot"><canvas id="map" aria-label="Map: vehicle, sensor footprint and tracks, north up"></canvas></div>
+    </section>
+
+    <section class="mfd" id="mfd-pfd" aria-label="Primary flight display">
+      <div class="page page-plain">
+        <div class="screen"><canvas id="pfd" aria-label="Primary flight display: flight modes, attitude, ground speed, altitude and heading with sensor and target bugs"></canvas></div>
       </div>
+    </section>
+
+    <section class="mfd" id="mfd-b" aria-label="Second display">
+      <div class="page" id="page-hsd">
+        <div class="osb osb-t"><span></span><span></span><span></span><span></span><span></span></div>
+        <div class="osb osb-l">
+          <button class="lg" id="osb-rng-up" type="button" title="Increase the range">&#9650;</button>
+          <span class="lg"><small>RNG</small><span id="lg-rng">500</span></span>
+          <button class="lg" id="osb-rng-dn" type="button" title="Decrease the range">&#9660;</button>
+          <span></span><span></span>
+        </div>
+        <div class="screen"><canvas id="map" aria-label="Horizontal situation display: own aircraft, sensor footprint, tracks and line to the target"></canvas></div>
+        <div class="osb osb-r">
+          <button class="lg" id="osb-orient" type="button" title="Heading up or north up"><span id="lg-orient">HDG</span><small>UP</small></button>
+          <button class="lg" id="osb-dep" type="button" title="Own aircraft depressed or centred"><span id="lg-dep">DEP</span></button>
+          <span></span><span></span><span></span>
+        </div>
+        <div class="osb osb-b">
+          <button class="lg" id="osb-swap-b" type="button" title="Swap the displays (M)">SWAP</button>
+          <span></span>
+          <span class="lg lg-box">HSD</span>
+          <span></span><span></span>
+        </div>
+      </div>
+    </section>
+
+    <div class="dedrow">
+      <section class="ded" aria-label="Target data">
+        <h2>TGT DATA</h2>
+        <div class="kv">
+          <div><i>TRK</i><b id="g-trk">---</b></div>
+          <div><i>STAT</i><b id="g-stat">---</b></div>
+          <div class="w"><i>GRID</i><b id="g-grid">---</b></div>
+          <div class="w"><i>LAT</i><b id="g-lat">---</b></div>
+          <div class="w"><i>LON</i><b id="g-lon">---</b></div>
+          <div><i>ELEV</i><b id="g-elev">---</b></div>
+          <div><i>MTHD</i><b id="g-mthd">---</b></div>
+          <div><i>SLR</i><b id="g-slr">---</b></div>
+          <div><i>GR</i><b id="g-gr">---</b></div>
+          <div><i>BRG</i><b id="g-brg">---</b></div>
+          <div><i>LOCK</i><b id="g-lock">---</b></div>
+          <div class="w"><i>LOS</i><b id="g-los">---</b></div>
+          <div class="w"><i>BSE</i><b id="g-bse">---</b></div>
+        </div>
+      </section>
+
+      <section class="ded" aria-label="Track file">
+        <h2>TRACK FILE <span id="trk-count"></span></h2>
+        <div class="tf-wrap">
+          <table class="tf">
+            <thead><tr><th>ID</th><th>CLS</th><th class="n">CONF</th><th class="n">AGE</th><th class="n">RNG</th><th class="n">BRG</th><th>GRID</th><th>STAT</th></tr></thead>
+            <tbody id="tracks-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="ded" aria-label="Cautions and messages">
+        <h2>CAS / MSG <span id="msg-count"></span></h2>
+        <div class="cas">
+          <span id="c-link">LINK</span><span id="c-gps">GPS</span><span id="c-batt">BATT</span>
+          <span id="c-gmb">GMB</span><span id="c-trk">TRK</span><span id="c-vid">VID</span>
+        </div>
+        <ol class="msg" id="log"></ol>
+      </section>
     </div>
-    <div class="payload-bar">
-      <span class="pb-group">
-        <span class="pb-label">Tracker</span>
-        <i class="led" id="led-trk"></i><span class="pb-state" id="trk-state">SEARCH</span>
-      </span>
-      <button class="btn" id="btn-release" type="button">Break lock <kbd>R</kbd></button>
-      <button class="btn" id="btn-pause" type="button" aria-pressed="false"><span class="lbl">Freeze</span> <kbd>Space</kbd></button>
-      <span class="pb-group">
-        <span class="pb-label">Gimbal</span>
-        <span class="seg" id="seg-gimbal" role="group" aria-label="Gimbal mode">
-          <button type="button" data-v="follow">Follow</button><button type="button" data-v="hold">Hold</button>
-        </span>
-      </span>
-      <span class="pb-group">
-        <span class="pb-label">Acquire</span>
-        <span class="seg" id="seg-acq" role="group" aria-label="Target acquisition">
-          <button type="button" data-v="auto">Auto</button><button type="button" data-v="manual">Manual</button>
-        </span>
-      </span>
-      <span class="pb-hint" id="pb-hint">Click a target in the video to designate it</span>
-    </div>
-  </section>
-
-  <aside class="side">
-    <section class="pane" aria-label="Flight instruments">
-      <div class="pane-title"><span>Instruments</span><span class="pane-meta" id="inst-meta">—</span></div>
-      <div class="instruments">
-        <canvas id="adi" aria-label="Attitude indicator"></canvas>
-        <canvas id="hsi" aria-label="Heading indicator with sensor azimuth and target bearing"></canvas>
-      </div>
-    </section>
-
-    <section class="pane" aria-label="Telemetry">
-      <div class="pane-title"><span>Telemetry</span><span class="pane-meta" id="tele-meta">—</span></div>
-      <div class="values" id="values">
-        <div class="val"><span class="k">Altitude AGL</span><span class="v" id="t-agl">—</span></div>
-        <div class="val"><span class="k">Altitude MSL</span><span class="v" id="t-msl">—</span></div>
-        <div class="val"><span class="k">Ground speed</span><span class="v" id="t-gs">—</span></div>
-        <div class="val"><span class="k">Heading</span><span class="v" id="t-hdg">—</span></div>
-        <div class="val"><span class="k">Sensor azimuth</span><span class="v" id="t-az">—</span></div>
-        <div class="val"><span class="k">Sensor elevation</span><span class="v" id="t-el">—</span></div>
-        <div class="val wide"><span class="k">Position</span><span class="v" id="t-pos">—</span></div>
-      </div>
-    </section>
-
-    <section class="pane" aria-label="Target">
-      <div class="pane-title"><span>Target</span><span class="pane-meta" id="tgt-meta">—</span></div>
-      <table class="kv">
-        <tbody>
-          <tr><th>Track</th><td id="g-track">—</td></tr>
-          <tr><th>Status</th><td id="g-status">—</td></tr>
-          <tr><th>Boresight error</th><td id="g-err">—</td></tr>
-          <tr><th>Latitude</th><td id="g-lat">—</td></tr>
-          <tr><th>Longitude</th><td id="g-lon">—</td></tr>
-          <tr><th>Range</th><td id="g-rng">—</td></tr>
-          <tr><th>Bearing</th><td id="g-brg">—</td></tr>
-        </tbody>
-      </table>
-      <div class="strip">
-        <div class="strip-title"><span>Tracking error, last 30 s</span><a id="g-map" class="link" href="#" target="_blank" rel="noopener" hidden>Open in map</a></div>
-        <canvas id="sp-err" aria-label="Tracking error over the last 30 seconds"></canvas>
-      </div>
-    </section>
-  </aside>
-
-  <div class="bottom">
-    <section class="pane" aria-label="Tracks">
-      <div class="pane-title"><span>Tracks</span><span class="pane-meta" id="tracks-meta">0</span></div>
-      <div class="grid-wrap">
-        <table class="grid">
-          <thead><tr><th>ID</th><th>Class</th><th class="num">Conf</th><th class="num">Age s</th><th class="num">Range m</th><th class="num">Brg °</th><th>Status</th></tr></thead>
-          <tbody id="tracks-body"></tbody>
-        </table>
-      </div>
-    </section>
-    <section class="pane" aria-label="Messages">
-      <div class="pane-title"><span>Messages</span><span class="pane-meta" id="msg-meta">—</span></div>
-      <ol class="log" id="log"></ol>
-    </section>
-  </div>
-</main>
-
-<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
-<noscript><p class="noscript">SkyTrack GCS needs JavaScript.</p></noscript>
+  </main>
+</div>
+<div class="toast" id="toast" role="status" hidden></div>
 <script src="app.js"></script>
 </body>
 </html>

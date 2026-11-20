@@ -1,6 +1,7 @@
 import json
 import math
 
+import cv2
 import numpy as np
 import pytest
 
@@ -237,3 +238,35 @@ def test_hud_track_only_mode_and_fonts():
     frame = np.zeros((540, 960, 3), np.uint8)
     out = draw_hud(frame, [], LockStatus(), TargetLock(LockConfig(enabled=False)), 0.0, 0.0, "yolo")
     assert out.shape == (540, 960, 3)
+
+
+def test_nested_square_check_rejects_plain_squares():
+    from skytrack.config import DetectorConfig
+
+    frame = np.full((300, 600, 3), 110, np.uint8)
+    cv2.rectangle(frame, (60, 100), (140, 180), (230, 230, 230), -1)  # a plain square roof
+    for s, col in ((80, (225, 225, 220)), (67, (40, 40, 42)), (45, (225, 225, 220)), (24, (50, 50, 170))):
+        cv2.rectangle(frame, (400 - s // 2, 140 - s // 2), (400 + s // 2, 140 + s // 2), col, -1)  # a board
+    plain = ClassicTargetDetector(DetectorConfig(min_side=20)).detect(frame)
+    nested = ClassicTargetDetector(DetectorConfig(min_side=20, require_nested=True)).detect(frame)
+    assert len(plain) == 2
+    assert len(nested) == 1 and nested[0].bbox[0] > 300
+
+
+def test_scene_ground_is_the_aerial_photo_with_procedural_fallback():
+    from skytrack.synthetic import _aerial
+
+    aerial = _aerial()
+    assert aerial is not None, "src/skytrack/data/vallei.webp missing (scripts/build_aerial.py)"
+    img, meta = aerial
+    assert img.shape[1::-1] == tuple(meta["size"]) and meta["gsd_m"] == 0.2 and "CC BY" in meta["attribution"]
+    photo = SyntheticScene(seed=3)
+    assert not photo.world.roads and all(m.kind == "target" for m in photo.movers)
+    np.testing.assert_allclose(photo.world.sun / 3.0, meta["sun_dir"])
+    procedural = SyntheticScene(seed=3, background="procedural")
+    assert procedural.world.roads and any(m.kind == "car" for m in procedural.movers)
+    det = ClassicTargetDetector(load_config("configs/demo.yaml").detector)
+    for scene in (photo, procedural):
+        frame, gt = scene.step()
+        assert frame.shape == (540, 960, 3) and gt
+        assert det.detect(frame)

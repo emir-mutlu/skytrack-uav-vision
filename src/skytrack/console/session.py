@@ -290,8 +290,15 @@ class ConsoleSession:
                 footprint = self._footprint(vs, w, h)
         tg = res.extras.get("target_geo")
         cmd = res.extras.get("gimbal_cmd")
+        elev = None  # target elevation AMSL: from the DEM, else the flat ground under the vehicle
+        if tg is not None:
+            if tg.ground_alt_m is not None:
+                elev = round(tg.ground_alt_m, 1)
+            elif vs is not None and vs.alt_amsl is not None and vs.alt_rel is not None:
+                elev = round(vs.alt_amsl - vs.alt_rel, 1)
         return {
             "seq": self.seq + 1, "t": round(res.t, 2), "frame": res.index, "fps": round(res.fps, 1),
+            "utc": time.strftime("%H:%M:%S", time.gmtime()),
             "latency_ms": round(res.latency_ms, 2), "paused": self.paused, "ended": self.ended,
             "source": self.source_label, "profile": cfg.profile, "detector": pipe.detector.name, "size": [w, h],
             "camera_hfov": cfg.camera.hfov_deg, "read_only": self.read_only,
@@ -306,7 +313,8 @@ class ConsoleSession:
             "vehicle": vehicle,
             "target_geo": None if tg is None else {"lat": round(tg.lat, 7), "lon": round(tg.lon, 7),
                                                    "range_m": round(tg.ground_range_m, 1),
-                                                   "slant_m": round(tg.slant_range_m, 1), "method": tg.method},
+                                                   "slant_m": round(tg.slant_range_m, 1), "elev_m": elev,
+                                                   "method": tg.method},
             "gimbal": {"available": pipe.link is not None, "follow": cfg.mavlink.gimbal.follow,
                        "active": bool(res.extras.get("gimbal_follow")),
                        "cmd": None if cmd is None else [round(v, 2) for v in cmd]},

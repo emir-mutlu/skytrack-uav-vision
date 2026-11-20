@@ -8,7 +8,7 @@ import time
 import pytest
 
 from skytrack.config import GimbalConfig, MavlinkConfig, load_config
-from skytrack.geo import geolocate
+from skytrack.geo import geolocate, mgrs, utm
 from skytrack.gimbal import GimbalController
 
 HOME = (-35.363261, 149.165230)
@@ -213,3 +213,15 @@ def test_link_check_reports_missing_autopilot():
     ok = run_link_check(MavlinkConfig(enabled=True, connection="udpin:127.0.0.1:14584"),
                         window_s=0.5, timeout_s=1.0, out=lines.append)
     assert not ok and any("no autopilot HEARTBEAT" in line for line in lines)
+
+
+def test_mgrs_reference_points():
+    assert mgrs(0.0, 0.0, digits=5) == "31N AA 66021 00000"
+    assert mgrs(38.8895, -77.0353) == "18S UJ 2347 0648"  # Washington Monument, 10 m, truncated
+    assert mgrs(-33.8568, 151.2153).startswith("56H LH")  # southern hemisphere, even zone
+    assert mgrs(60.39, 5.32).startswith("32V ")  # Norway zone exception
+    assert mgrs(78.22, 15.65).startswith("33X ")  # Svalbard zone exception
+    zone, band, easting, northing = utm(-35.363261, 149.165230)
+    assert (zone, band) == (55, "H") and easting == pytest.approx(696719.4, abs=1.0)
+    with pytest.raises(ValueError):
+        mgrs(85.0, 0.0)

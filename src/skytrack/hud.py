@@ -18,12 +18,14 @@ import os
 import time
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from .geo import mgrs
 from .lock import LockState, LockStatus, TargetLock
 from .types import BBox, Track
 
@@ -53,10 +55,13 @@ PANEL_ALPHA = 0.62
 AA = cv2.LINE_AA
 
 # ----------------------------------------------------------------------------- fonts
+# B612 Mono - the open cockpit-display face Airbus developed with ENAC (SIL OFL 1.1) - ships
+# with the package, so the symbology looks the same on every machine; system faces are fallbacks.
+_B612 = Path(__file__).resolve().parent / "console" / "static"
 _FONT_CANDIDATES = {
-    "sans": ("bahnschrift.ttf", "segoeui.ttf", "DejaVuSans.ttf", "Arial.ttf", "Helvetica.ttc"),
-    "bold": ("bahnschrift.ttf", "segoeuib.ttf", "DejaVuSans-Bold.ttf", "Arial Bold.ttf", "Helvetica.ttc"),
-    "mono": ("CascadiaMono.ttf", "consola.ttf", "DejaVuSansMono.ttf", "Menlo.ttc", "Courier New.ttf"),
+    "sans": (str(_B612 / "B612Mono-Regular.ttf"), "bahnschrift.ttf", "segoeui.ttf", "DejaVuSans.ttf", "Arial.ttf"),
+    "bold": (str(_B612 / "B612Mono-Bold.ttf"), "bahnschrift.ttf", "segoeuib.ttf", "DejaVuSans-Bold.ttf"),
+    "mono": (str(_B612 / "B612Mono-Regular.ttf"), "CascadiaMono.ttf", "consola.ttf", "DejaVuSansMono.ttf"),
 }
 
 
@@ -274,6 +279,14 @@ def _dms(value: float, pos: str, neg: str, deg_digits: int) -> str:
     return f"{d:0{deg_digits}d}°{m:02d}'{s:04.1f}\"{pos if value >= 0 else neg}"
 
 
+def _grid(lat: float, lon: float) -> str:
+    """MGRS (10 m) as military video overlays show positions; DMS where MGRS is undefined."""
+    try:
+        return mgrs(lat, lon)
+    except ValueError:
+        return latlon_dms(lat, lon)
+
+
 def latlon_dms(lat: float, lon: float) -> str:
     return f"{_dms(lat, 'N', 'S', 2)} {_dms(lon, 'E', 'W', 3)}"
 
@@ -473,7 +486,7 @@ def _data_blocks(cv: _Canvas, w: int, h: int, pad: int, lock: LockStatus, target
 
     bl: list[str] = []
     if vehicle is not None and link_ok and vehicle.lat is not None:
-        bl.append(f"AC  {latlon_dms(vehicle.lat, vehicle.lon)}")
+        bl.append(f"AC  {_grid(vehicle.lat, vehicle.lon)}")
         if vehicle.gimbal_pitch_deg is not None:
             bl.append(f"GMB AZ{vehicle.gimbal_yaw_deg or 0:+06.1f} EL{vehicle.gimbal_pitch_deg:+05.1f}"
                       + ("  FOLLOW" if follow else "  HOLD"))
@@ -486,7 +499,7 @@ def _data_blocks(cv: _Canvas, w: int, h: int, pad: int, lock: LockStatus, target
                  LockState.LOST: "LOST"}.get(lock.state, "")
         br.append(f"TGT {target.track_id}  {state}")
         if geo is not None:
-            br.append(latlon_dms(geo.lat, geo.lon))
+            br.append(_grid(geo.lat, geo.lon))
             br.append(f"SLR {geo.slant_range_m:4.0f}M  GR {geo.ground_range_m:4.0f}M  {geo.method.upper()}")
         elif lock.error is not None:
             br.append(f"ERR X{lock.error[0]:+.2f} Y{lock.error[1]:+.2f}")

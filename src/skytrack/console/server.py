@@ -29,7 +29,7 @@ from .session import ConsoleSession
 
 STATIC = Path(__file__).with_name("static")
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
-                 ".js": "application/javascript; charset=utf-8", ".svg": "image/svg+xml"}
+                 ".js": "application/javascript; charset=utf-8", ".svg": "image/svg+xml", ".ttf": "font/ttf"}
 BOUNDARY = b"skytrackframe"
 DISCONNECTED = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 
